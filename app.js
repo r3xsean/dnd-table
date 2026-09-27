@@ -446,7 +446,7 @@ function showResult(total, breakdown, tag, advMode) {
 function renderHistory() {
   const ol = $('#history');
   ol.replaceChildren(
-    ...state.history.slice(0, 12).map((h) => {
+    ...state.history.slice(0, 6).map((h) => {
       const li = document.createElement('li');
       li.dataset.tag = h.tag || '';
       const e = document.createElement('span');

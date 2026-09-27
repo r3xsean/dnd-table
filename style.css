@@ -486,7 +486,7 @@ body.rolling:not(.holding) .tray { cursor: progress; }
   color: #c9c6d0;
 }
 .history li:first-child { border-left-color: var(--yellow); background: rgba(10, 10, 14, 0.9); }
-.history li:nth-child(n + 7) { opacity: 0.45; }
+.history li:nth-child(n + 4) { opacity: 0.5; }
 .history li[data-tag='crit'] { border-left-color: var(--green); }
 .history li[data-tag='fumble'] { border-left-color: var(--red); }
 .history li b { font-family: var(--display); font-weight: 400; font-size: 20px; color: var(--ink); }

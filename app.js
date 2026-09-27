@@ -1,4 +1,5 @@
 import { DiceTray } from './dice.js';
+import { sfx } from './sfx.js';
 
 const KEY = 'the-table-v1';
 const ORDER = [4, 6, 8, 10, 12, 20, 100];
@@ -54,7 +55,21 @@ $('#long-rest').addEventListener('click', () => {
   state.players.forEach((p) => (p.hp = p.max));
   save();
   renderParty();
+  sfx.unlock();
+  sfx.heal();
 });
+
+const soundBtn = $('#sound');
+const renderSound = () => {
+  soundBtn.textContent = sfx.enabled ? 'Sound on' : 'Sound off';
+  soundBtn.classList.toggle('off', !sfx.enabled);
+};
+soundBtn.addEventListener('click', () => {
+  sfx.enabled = !sfx.enabled;
+  sfx.unlock();
+  renderSound();
+});
+renderSound();
 
 /* ---------- Party ---------- */
 
@@ -101,6 +116,16 @@ function playerCard(p) {
     amt.value = '';
     const diff = p.hp - before;
     if (diff) float(`${diff > 0 ? '+' : '−'}${Math.abs(diff)}`, diff > 0 ? 'heal' : 'dmg');
+    sfx.unlock();
+    if (diff < 0) {
+      if (p.hp === 0) {
+        splash('down', p.name);
+        sfx.down();
+      } else if (-diff >= Math.max(5, Math.ceil(p.max * 0.2))) {
+        splash('dmg', p.name, -diff);
+        sfx.hit(1);
+      } else sfx.hit(0.45);
+    } else if (diff > 0) sfx.heal();
     refresh();
     save();
   };
@@ -142,10 +167,48 @@ $('#add-player').addEventListener('click', () => {
 
 renderParty();
 
+/* ---------- Tray effects ---------- */
+
+const trayEl = $('#tray');
+
+function restartAnim(el, cls) {
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+}
+
+function flash(kind) {
+  const f = $('#flash');
+  f.dataset.kind = kind;
+  restartAnim(f, 'go');
+}
+
+function splash(kind, name, amount) {
+  trayEl.querySelector('.splash')?.remove();
+  const el = document.createElement('div');
+  el.className = `splash ${kind}`;
+  el.innerHTML = '<div class="splash-num"></div><div class="splash-name"></div>';
+  $('.splash-num', el).textContent = kind === 'down' ? 'Down!' : `−${amount}`;
+  $('.splash-name', el).textContent = name || 'Player';
+  el.addEventListener('animationend', (e) => {
+    if (e.animationName === 'splash-out') el.remove();
+  });
+  trayEl.appendChild(el);
+  restartAnim(trayEl, 'shake');
+  flash('dmg');
+}
+
 /* ---------- Dice ---------- */
 
-const tray = new DiceTray($('#tray'));
-const fontsReady = document.fonts.load('100px Anton').catch(() => {});
+const tray = new DiceTray(trayEl, {
+  onImpact: (speed, kind) => sfx.clack(speed, kind),
+  onThrow: (strength) => sfx.whoosh(strength),
+});
+let fontsLoaded = false;
+const fontsReady = document.fonts
+  .load('100px Anton')
+  .catch(() => {})
+  .then(() => (fontsLoaded = true));
 
 let pool = {};
 let adv = null;
@@ -244,10 +307,43 @@ document.addEventListener('keydown', (e) => {
 const resultEl = $('#result');
 
 async function roll() {
-  if (rolling) return;
+  const r = beginRoll();
+  if (!r) return;
+  await fontsReady;
+  finishRoll(r, await tray.roll(r.specs));
+}
+
+// Throw by hand: press in the tray to pick the dice up, drag and let go to fling them.
+let held = null;
+trayEl.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || !fontsLoaded) return;
+  held = beginRoll();
+  if (!held) return;
+  trayEl.setPointerCapture(e.pointerId);
+  document.body.classList.add('holding');
+  tray.grab(held.specs, e.clientX, e.clientY);
+});
+trayEl.addEventListener('pointermove', (e) => {
+  if (held) tray.moveHand(e.clientX, e.clientY);
+});
+const letGo = async () => {
+  if (!held) return;
+  const r = held;
+  held = null;
+  document.body.classList.remove('holding');
+  finishRoll(r, await tray.release());
+};
+trayEl.addEventListener('pointerup', letGo);
+trayEl.addEventListener('pointercancel', letGo);
+
+/** Snapshot the selection into dice specs and reset the controls. Returns null if a roll is in progress. */
+function beginRoll() {
+  if (rolling) return null;
   rolling = true;
+  sfx.unlock();
   document.body.classList.add('rolling');
   resultEl.classList.remove('show');
+  $('.hint', trayEl)?.classList.add('gone');
 
   const p = Object.keys(pool).length ? { ...pool } : { 20: 1 };
   const mod = getMod();
@@ -271,26 +367,36 @@ async function roll() {
       groups.push(g);
     }
   }
+  return { specs, groups, mod, advMode, expr };
+}
 
-  await fontsReady;
-  const vals = await tray.roll(specs);
-
+function finishRoll({ groups, mod, advMode, expr }, vals) {
   let sum = 0;
+  const crits = [], fumbles = [];
   for (const g of groups) {
     const [a, b] = g.idx.map((i) => vals[i]);
+    let kept = g.idx[0];
     if (g.sides === 100) g.value = (a % 10) * 10 + (b % 10) || 100;
     else if (b !== undefined) {
       g.value = advMode === 'adv' ? Math.max(a, b) : Math.min(a, b);
       g.pair = [a, b];
+      if (a !== g.value) kept = g.idx[1];
+      tray.mark(kept === g.idx[0] ? g.idx[1] : g.idx[0], 'dropped');
     } else g.value = a;
+    if (g.sides === 20 && g.value === 20) crits.push(kept);
+    if (g.sides === 20 && g.value === 1) fumbles.push(kept);
     sum += g.value;
   }
   const total = sum + mod;
 
-  let tag = '';
-  if (groups.length === 1 && groups[0].sides === 20) {
-    if (groups[0].value === 20) tag = 'crit';
-    if (groups[0].value === 1) tag = 'fumble';
+  const tag = crits.length ? 'crit' : fumbles.length ? 'fumble' : '';
+  crits.forEach((i) => tray.mark(i, 'crit'));
+  fumbles.forEach((i) => tray.mark(i, 'fumble'));
+  if (tag === 'crit') sfx.crit();
+  if (tag === 'fumble') sfx.fumble();
+  if (tag) {
+    flash(tag);
+    restartAnim(trayEl, 'shake');
   }
 
   const bySides = ORDER.map((s) => groups.filter((g) => g.sides === s)).filter((a) => a.length);
@@ -315,8 +421,18 @@ async function roll() {
   document.body.classList.remove('rolling');
 }
 
+function countUp(el, to) {
+  const start = performance.now(), dur = 600;
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / dur);
+    el.textContent = Math.round(to * (1 - (1 - t) ** 3));
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
 function showResult(total, breakdown, tag, advMode) {
-  $('.result-total', resultEl).textContent = total;
+  countUp($('.result-total', resultEl), total);
   $('.result-break', resultEl).innerHTML = breakdown;
   const label = tag === 'crit' ? 'Natural 20!' : tag === 'fumble' ? 'Natural 1' : advMode === 'adv' ? 'Advantage' : advMode === 'dis' ? 'Disadvantage' : 'Total';
   $('.result-tag', resultEl).textContent = label;

@@ -78,6 +78,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn:hover { transform: translate(-1px, -1px); box-shadow: 5px 5px 0 var(--line); }
 .btn:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--line); }
 .btn.ghost { background: var(--ink); }
+#sound.off { background: #9a978f; text-decoration: line-through; }
 
 .icon-btn {
   width: 34px;
@@ -301,6 +302,96 @@ main {
     linear-gradient(#1a1420, #0e0c12);
 }
 .tray canvas { position: absolute; inset: 0; display: block; }
+.tray { cursor: grab; touch-action: none; user-select: none; }
+body.holding .tray { cursor: grabbing; }
+body.rolling:not(.holding) .tray { cursor: progress; }
+.tray.shake { animation: tray-shake 0.45s; }
+@keyframes tray-shake {
+  15% { transform: translate(-10px, 4px) rotate(-0.4deg); }
+  30% { transform: translate(9px, -5px) rotate(0.4deg); }
+  45% { transform: translate(-6px, 3px); }
+  60% { transform: translate(5px, -2px); }
+  80% { transform: translate(-2px, 1px); }
+}
+
+.hint {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  pointer-events: none;
+  font-family: var(--display);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 15px;
+  color: rgba(246, 242, 233, 0.35);
+  white-space: nowrap;
+  transition: opacity 0.4s;
+}
+.hint.gone { opacity: 0; }
+
+.flash {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0;
+}
+.flash[data-kind='crit'] { background: radial-gradient(circle, rgba(255, 200, 61, 0.55), rgba(255, 150, 0, 0.15) 60%, transparent); }
+.flash[data-kind='fumble'],
+.flash[data-kind='dmg'] { background: radial-gradient(circle, rgba(255, 30, 30, 0.1), rgba(255, 0, 0, 0.5)); }
+.flash.go { animation: flash 0.9s ease-out; }
+@keyframes flash { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+.splash {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  pointer-events: none;
+  text-align: center;
+  transform: translate(-50%, -50%) rotate(-6deg);
+  animation: splash-in 0.4s cubic-bezier(0.2, 1.5, 0.4, 1), splash-out 0.45s ease-in 1.5s forwards;
+}
+.splash::before {
+  content: '';
+  position: absolute;
+  left: -40vw;
+  right: -40vw;
+  top: 58%;
+  height: 64px;
+  background: var(--line);
+  z-index: -1;
+}
+.splash-num {
+  font-family: var(--display);
+  font-size: 190px;
+  line-height: 1;
+  color: var(--red);
+  -webkit-text-stroke: 6px var(--line);
+  paint-order: stroke fill;
+  text-shadow: 10px 10px 0 var(--line);
+  text-transform: uppercase;
+}
+.splash-name {
+  position: relative;
+  font-family: var(--display);
+  font-size: 40px;
+  line-height: 64px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--yellow);
+  margin-top: -18px;
+}
+.splash.down .splash-num { font-size: 150px; color: var(--ink); text-shadow: 10px 10px 0 var(--red); }
+@keyframes splash-in {
+  0% { transform: translate(-50%, -50%) rotate(-6deg) scale(3); opacity: 0; }
+  100% { transform: translate(-50%, -50%) rotate(-6deg) scale(1); opacity: 1; }
+}
+@keyframes splash-out {
+  to { transform: translate(-50%, -50%) rotate(-6deg) scale(0.85); opacity: 0; }
+}
 
 .result {
   position: absolute;

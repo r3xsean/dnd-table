@@ -243,10 +243,97 @@ function readDie(die) {
 
 const rand = (a, b) => a + Math.random() * (b - a);
 
+const HAND_Y = 4.5;
+const HAND_GAP = 2.6;
+// Held dice sit in hex clusters of 7, stacked in layers.
+const HEX = [[0, 0], [1, 0], [0.5, 0.866], [-0.5, 0.866], [-1, 0], [-0.5, -0.866], [0.5, -0.866]];
+const handOffset = (i) => {
+  const [x, z] = HEX[i % 7];
+  return new THREE.Vector3(x * HAND_GAP, Math.floor(i / 7) * HAND_GAP, z * HAND_GAP);
+};
+
+let sparkTex;
+function getSparkTex() {
+  if (sparkTex) return sparkTex;
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.25, 'rgba(255,255,255,0.85)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return (sparkTex = new THREE.CanvasTexture(c));
+}
+
+class Burst {
+  constructor(origin, { count = 10, color = 0xffd9a0, speed = 6, up = 0.5, life = 0.4, size = 0.25, gravity = -30 }) {
+    this.age = 0;
+    this.life = life;
+    this.gravity = gravity;
+    this.pos = new Float32Array(count * 3);
+    this.vel = [];
+    for (let i = 0; i < count; i++) {
+      const v = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize();
+      v.y = Math.abs(v.y) * (1 - up) + up * rand(0.6, 1);
+      this.vel.push(v.normalize().multiplyScalar(speed * rand(0.35, 1)));
+      this.pos.set([origin.x, origin.y, origin.z], i * 3);
+    }
+    this.geo = new THREE.BufferGeometry();
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
+    this.mat = new THREE.PointsMaterial({
+      color, size, map: getSparkTex(), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.obj = new THREE.Points(this.geo, this.mat);
+  }
+  update(dt) {
+    this.age += dt;
+    this.vel.forEach((v, i) => {
+      v.y += this.gravity * dt;
+      const p = this.pos;
+      p[i * 3] += v.x * dt;
+      p[i * 3 + 1] += v.y * dt;
+      p[i * 3 + 2] += v.z * dt;
+      if (p[i * 3 + 1] < 0.05) { p[i * 3 + 1] = 0.05; v.y *= -0.3; v.x *= 0.7; v.z *= 0.7; }
+    });
+    this.geo.attributes.position.needsUpdate = true;
+    this.mat.opacity = Math.max(0, 1 - (this.age / this.life) ** 2);
+    return this.age < this.life;
+  }
+  dispose() { this.geo.dispose(); this.mat.dispose(); }
+}
+
+class Shockwave {
+  constructor(origin, color, life = 0.8) {
+    this.age = 0;
+    this.life = life;
+    this.geo = new THREE.RingGeometry(0.85, 1, 64).rotateX(-Math.PI / 2);
+    this.mat = new THREE.MeshBasicMaterial({
+      color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.obj = new THREE.Mesh(this.geo, this.mat);
+    this.obj.position.set(origin.x, 0.06, origin.z);
+  }
+  update(dt) {
+    this.age += dt;
+    const t = this.age / this.life;
+    this.obj.scale.setScalar(1 + (1 - (1 - t) ** 3) * 11);
+    this.mat.opacity = Math.max(0, 1 - t);
+    return t < 1;
+  }
+  dispose() { this.geo.dispose(); this.mat.dispose(); }
+}
+
 export class DiceTray {
-  constructor(el) {
+  /** hooks: { onImpact(speed, 'dice'|'floor'|'wall'), onThrow(strength 0-1) } */
+  constructor(el, hooks = {}) {
     this.el = el;
+    this.hooks = hooks;
     this.dice = [];
+    this.fx = [];
+    this.glows = [];
+    this.hand = null;
     this.rolling = false;
     this.dirty = true;
 
@@ -289,7 +376,7 @@ export class DiceTray {
     world.addContactMaterial(new CANNON.ContactMaterial(wallMat, this.diceMat, { friction: 0.05, restitution: 0.7 }));
     world.addContactMaterial(new CANNON.ContactMaterial(this.diceMat, this.diceMat, { friction: 0.15, restitution: 0.5 }));
 
-    const floorBody = new CANNON.Body({ mass: 0, material: floorMat, shape: new CANNON.Plane() });
+    const floorBody = (this.floorBody = new CANNON.Body({ mass: 0, material: floorMat, shape: new CANNON.Plane() }));
     floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
     world.addBody(floorBody);
     this.walls = [Math.PI / 2, -Math.PI / 2, 0, Math.PI].map((ry) => {
@@ -307,6 +394,27 @@ export class DiceTray {
       requestAnimationFrame(loop);
       const dt = Math.min(0.05, (t - (last ?? t)) / 1000);
       last = t;
+      if (this.hand) {
+        this.updateHand(dt, t / 1000);
+        this.dirty = true;
+      }
+      if (this.fx.length) {
+        this.fx = this.fx.filter((f) => {
+          if (f.update(dt)) return true;
+          scene.remove(f.obj);
+          f.dispose();
+          return false;
+        });
+        this.dirty = true;
+      }
+      for (const g of this.glows) {
+        if (g.t > 6) continue;
+        g.t += dt;
+        const pulse = Math.sin(g.t * 7);
+        g.mat.emissiveIntensity = 0.55 + 0.3 * pulse;
+        g.light.intensity = g.base * (0.85 + 0.15 * pulse);
+        this.dirty = true;
+      }
       if (this.rolling) {
         world.step(1 / 120, dt, 12);
         for (const d of this.dice) {
@@ -362,15 +470,76 @@ export class DiceTray {
   }
 
   clear() {
-    for (const d of this.dice) {
+    const held = this.hand ? this.hand.dice : [];
+    for (const d of [...this.dice, ...held]) {
       this.scene.remove(d.mesh);
       this.world.removeBody(d.body);
+      if (d.ownMat) d.mesh.material.dispose();
     }
+    for (const g of this.glows) this.scene.remove(g.light);
+    for (const f of this.fx) { this.scene.remove(f.obj); f.dispose(); }
     this.dice = [];
+    this.glows = [];
+    this.fx = [];
+    this.hand = null;
     this.dirty = true;
   }
 
-  /** specs: [{ sides, tens? }] → Promise<number[]> (face values, d10 gives 1-10) */
+  makeDie(spec) {
+    const kind = getKind(spec.sides, spec.tens ? 'tens' : 'normal');
+    const mesh = new THREE.Mesh(kind.geometry, kind.material);
+    mesh.castShadow = true;
+    mesh.add(new THREE.LineSegments(kind.edges, kind.edgeMat));
+    const def = kind.def;
+    const body = new CANNON.Body({
+      mass: 1,
+      material: this.diceMat,
+      shape: new CANNON.ConvexPolyhedron({
+        vertices: def.verts.map((v) => new CANNON.Vec3(v.x, v.y, v.z)),
+        faces: def.faces.map((f) => f.idx),
+      }),
+      linearDamping: 0.1,
+      angularDamping: 0.12,
+      sleepSpeedLimit: 0.15,
+      sleepTimeLimit: 0.2,
+    });
+    body.isDie = true;
+    const die = { def, kind, mesh, body, lastHit: 0 };
+    body.addEventListener('collide', (e) => this.onCollide(die, e));
+    return die;
+  }
+
+  onCollide(die, e) {
+    const other = e.body;
+    if (other.isDie && other.id < die.body.id) return; // dice-on-dice fires on both bodies
+    const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
+    const now = performance.now();
+    if (v < 1 || now - die.lastHit < 30) return;
+    die.lastHit = now;
+    const kind = other.isDie ? 'dice' : other === this.floorBody ? 'floor' : 'wall';
+    this.hooks.onImpact?.(v, kind);
+    if (v > (kind === 'dice' ? 9 : 14)) {
+      const c = e.contact;
+      const p = c.bi.position.vadd(c.ri);
+      this.addFx(new Burst(p, { count: Math.round(6 + v * 0.4), speed: 3 + v * 0.25, life: 0.35 }));
+    }
+  }
+
+  addFx(f) {
+    this.fx.push(f);
+    this.scene.add(f.obj);
+  }
+
+  start(dice) {
+    this.dice = dice;
+    this.elapsed = 0;
+    this.still = 0;
+    this.nudges = 0;
+    this.rolling = true;
+    return new Promise((res) => (this.resolve = res));
+  }
+
+  /** Auto-throw from a random side. specs: [{ sides, tens? }] → Promise<number[]> (d10 gives 1-10) */
   roll(specs) {
     this.clear();
     const { xHalf, zMin, zMax } = this.bounds;
@@ -380,25 +549,9 @@ export class DiceTray {
     const maxCols = Math.max(1, Math.floor((2 * xHalf - 3) / gap));
     const zc = (zMin + zMax) / 2;
 
-    specs.forEach((s, i) => {
-      const kind = getKind(s.sides, s.tens ? 'tens' : 'normal');
-      const mesh = new THREE.Mesh(kind.geometry, kind.material);
-      mesh.castShadow = true;
-      mesh.add(new THREE.LineSegments(kind.edges, kind.edgeMat));
-      const def = kind.def;
-      const shape = new CANNON.ConvexPolyhedron({
-        vertices: def.verts.map((v) => new CANNON.Vec3(v.x, v.y, v.z)),
-        faces: def.faces.map((f) => f.idx),
-      });
-      const body = new CANNON.Body({
-        mass: 1,
-        material: this.diceMat,
-        shape,
-        linearDamping: 0.1,
-        angularDamping: 0.12,
-        sleepSpeedLimit: 0.15,
-        sleepTimeLimit: 0.2,
-      });
+    const dice = specs.map((s, i) => {
+      const die = this.makeDie(s);
+      const { body, mesh } = die;
       const col = Math.floor(i / perCol), row = i % perCol;
       const inCol = Math.min(specs.length - col * perCol, perCol);
       body.position.set(
@@ -413,14 +566,123 @@ export class DiceTray {
       mesh.position.copy(body.position);
       mesh.quaternion.copy(body.quaternion);
       this.scene.add(mesh);
-      this.dice.push({ def, mesh, body });
+      return die;
     });
+    this.hooks.onThrow?.(0.8);
+    return this.start(dice);
+  }
 
-    this.elapsed = 0;
-    this.still = 0;
-    this.nudges = 0;
-    this.rolling = true;
-    return new Promise((res) => (this.resolve = res));
+  /* ----- Throwing by hand: grab() on pointer down, moveHand() while dragging, release() to throw ----- */
+
+  pointerToHand(cx, cy) {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, this.camera);
+    const p = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -HAND_Y), new THREE.Vector3());
+    if (!p) return this.hand?.target ?? new THREE.Vector3(0, HAND_Y, 0);
+    const { xHalf, zMin, zMax } = this.bounds;
+    const m = HAND_GAP + 0.4;
+    p.x = THREE.MathUtils.clamp(p.x, -Math.max(0, xHalf - m), Math.max(0, xHalf - m));
+    p.z = THREE.MathUtils.clamp(p.z, Math.min(0, zMin + m), Math.max(0, zMax - m));
+    return p;
+  }
+
+  grab(specs, cx, cy) {
+    this.clear();
+    const target = this.pointerToHand(cx, cy);
+    const dice = specs.map((s) => {
+      const die = this.makeDie(s);
+      die.mesh.quaternion.setFromEuler(new THREE.Euler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28)));
+      die.spinAxis = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize();
+      die.spin = rand(3, 7);
+      this.scene.add(die.mesh);
+      return die;
+    });
+    this.hand = { dice, target, pos: target.clone(), samples: [{ t: performance.now(), p: target.clone() }] };
+    this.updateHand(0, performance.now() / 1000);
+  }
+
+  moveHand(cx, cy) {
+    if (!this.hand) return;
+    const now = performance.now();
+    this.hand.target = this.pointerToHand(cx, cy);
+    this.hand.samples.push({ t: now, p: this.hand.target.clone() });
+    this.hand.samples = this.hand.samples.filter((s) => now - s.t < 150);
+  }
+
+  updateHand(dt, time) {
+    const h = this.hand;
+    h.pos.lerp(h.target, 1 - Math.exp(-dt * 30));
+    const q = new THREE.Quaternion();
+    h.dice.forEach((d, i) => {
+      d.mesh.position.copy(h.pos).add(handOffset(i));
+      d.mesh.position.y += Math.sin(time * 18 + i * 1.7) * 0.12; // rattle in the hand
+      d.mesh.quaternion.premultiply(q.setFromAxisAngle(d.spinAxis, d.spin * dt));
+    });
+  }
+
+  /** Throw the held dice with the pointer's recent velocity. → Promise<number[]> */
+  release() {
+    const h = this.hand;
+    if (!h) return Promise.resolve([]);
+    this.hand = null;
+    const now = performance.now();
+    const recent = h.samples.filter((s) => now - s.t < 100);
+    const vel = new THREE.Vector3();
+    if (recent.length > 1) {
+      const a = recent[0], b = recent[recent.length - 1];
+      const secs = (b.t - a.t) / 1000;
+      if (secs > 0.01) vel.subVectors(b.p, a.p).divideScalar(secs).multiplyScalar(1.15);
+    }
+    vel.y = 0;
+    if (vel.length() > 45) vel.setLength(45);
+    const speed = vel.length();
+    const flung = speed > 3;
+
+    for (const d of h.dice) {
+      const { body, mesh } = d;
+      body.position.copy(mesh.position);
+      body.quaternion.copy(mesh.quaternion);
+      if (flung) body.velocity.set(vel.x * rand(0.9, 1.1), rand(-2, 2), vel.z * rand(0.9, 1.1));
+      else body.velocity.set(rand(-4, 4), 0, rand(-4, 4)); // just a click: let them drop
+      const s = 10 + speed * 0.8;
+      body.angularVelocity.set(rand(-s, s), rand(-s, s), rand(-s, s));
+      this.world.addBody(body);
+    }
+    this.hooks.onThrow?.(flung ? Math.min(1, speed / 35) : 0.2);
+    return this.start(h.dice);
+  }
+
+  /** Highlight a settled die: 'dropped' (advantage loser), 'crit', or 'fumble'. */
+  mark(i, state) {
+    const d = this.dice[i];
+    if (!d) return;
+    const mat = (d.mesh.material = d.kind.material.clone());
+    d.ownMat = true;
+    const at = d.mesh.position;
+    if (state === 'dropped') {
+      mat.transparent = true;
+      mat.opacity = 0.3;
+      d.mesh.castShadow = false;
+      d.mesh.children[0].visible = false;
+    } else if (state === 'crit') {
+      mat.emissive = new THREE.Color(0xffa31a);
+      mat.emissiveIntensity = 0.6;
+      const light = new THREE.PointLight(0xffc040, 18, 12, 2);
+      light.position.set(at.x, at.y + 2.4, at.z);
+      this.scene.add(light);
+      this.glows.push({ mat, light, t: 0, base: 18 });
+      this.addFx(new Burst(at, { count: 180, color: 0xffc83d, speed: 20, up: 0.75, life: 1.7, size: 0.42, gravity: -24 }));
+      this.addFx(new Burst(at, { count: 70, color: 0xffffff, speed: 11, up: 0.6, life: 1.1, size: 0.3, gravity: -18 }));
+      this.addFx(new Shockwave(at, 0xffc83d, 0.9));
+    } else if (state === 'fumble') {
+      mat.color.setRGB(0.4, 0.3, 0.3);
+      mat.emissive = new THREE.Color(0x550000);
+      this.addFx(new Burst(at, { count: 90, color: 0xff2a2a, speed: 7, up: 0.35, life: 1.3, size: 0.34, gravity: -30 }));
+      this.addFx(new Shockwave(at, 0xff2a2a, 0.7));
+    }
+    this.dirty = true;
   }
 
   check(dt) {

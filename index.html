@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Table — D&amp;D</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header class="top">
+    <div class="logo">D20</div>
+    <input id="title" class="title" spellcheck="false" aria-label="Campaign name">
+    <div class="spacer"></div>
+    <button id="long-rest" class="btn ghost">Long rest</button>
+  </header>
+
+  <main>
+    <aside class="party">
+      <div class="party-head">
+        <h2>Party</h2>
+        <button id="add-player" class="btn">+ Add</button>
+      </div>
+      <div id="party-list" class="party-list"></div>
+    </aside>
+
+    <section class="stage">
+      <div id="tray" class="tray">
+        <div id="result" class="result">
+          <div class="result-tag"></div>
+          <div class="result-total"></div>
+          <div class="result-break"></div>
+        </div>
+        <div class="history-wrap">
+          <h3>Log</h3>
+          <ol id="history" class="history"></ol>
+        </div>
+      </div>
+
+      <div class="dicebar">
+        <div id="dice-buttons" class="dice-buttons"></div>
+        <div class="controls">
+          <div class="pool">
+            <span class="label">Rolling</span>
+            <span id="pool-expr" class="pool-expr"></span>
+            <button id="clear-pool" class="icon-btn" title="Clear">✕</button>
+          </div>
+          <div class="mod">
+            <button class="icon-btn" data-mod="-1">−</button>
+            <input id="mod" type="number" value="0" aria-label="Modifier">
+            <button class="icon-btn" data-mod="1">+</button>
+          </div>
+          <div class="advdis">
+            <button id="adv" class="toggle">Adv</button>
+            <button id="dis" class="toggle">Dis</button>
+          </div>
+          <button id="roll" class="roll-btn">Roll</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <template id="player-tpl">
+    <article class="player">
+      <div class="p-head">
+        <input class="p-name" spellcheck="false" aria-label="Name">
+        <button class="icon-btn p-del" title="Remove player">✕</button>
+      </div>
+      <div class="hp">
+        <div class="hp-nums">
+          <input class="hp-cur" type="number" aria-label="Current HP">
+          <span class="hp-slash">/</span>
+          <input class="hp-max" type="number" min="1" aria-label="Max HP">
+          <span class="hp-label">HP</span>
+          <span class="down-tag">Down</span>
+        </div>
+        <div class="bar"><i></i></div>
+        <div class="hp-ctrl">
+          <button class="hit">− Dmg</button>
+          <input class="amt" type="number" min="0" placeholder="1" aria-label="Amount">
+          <button class="heal">+ Heal</button>
+        </div>
+      </div>
+      <textarea class="notes" rows="2" placeholder="Notes — conditions, loot, secrets…"></textarea>
+    </article>
+  </template>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

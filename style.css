@@ -450,7 +450,10 @@ body.rolling:not(.holding) .tray { cursor: progress; }
 .result[data-tag='crit'] .result-tag { background: var(--green); }
 .result[data-tag='fumble'] .result-total { color: var(--red); }
 .result[data-tag='fumble'] .result-tag { background: var(--red); }
-@keyframes glow { to { filter: drop-shadow(0 0 22px rgba(54, 224, 127, 0.8)); } }
+@keyframes glow {
+  from { text-shadow: 7px 7px 0 var(--line), 0 0 10px rgba(54, 224, 127, 0.4); }
+  to { text-shadow: 7px 7px 0 var(--line), 0 0 36px rgba(54, 224, 127, 0.95); }
+}
 
 .history-wrap {
   position: absolute;

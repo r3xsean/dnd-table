@@ -411,7 +411,7 @@ export class DiceTray {
         if (g.t > 6) continue;
         g.t += dt;
         const pulse = Math.sin(g.t * 7);
-        g.mat.emissiveIntensity = 0.55 + 0.3 * pulse;
+        g.mat.emissiveIntensity = 0.3 + 0.15 * pulse;
         g.light.intensity = g.base * (0.85 + 0.15 * pulse);
         this.dirty = true;
       }
@@ -668,11 +668,11 @@ export class DiceTray {
       d.mesh.children[0].visible = false;
     } else if (state === 'crit') {
       mat.emissive = new THREE.Color(0xffa31a);
-      mat.emissiveIntensity = 0.6;
-      const light = new THREE.PointLight(0xffc040, 18, 12, 2);
-      light.position.set(at.x, at.y + 2.4, at.z);
+      mat.emissiveIntensity = 0.3;
+      const light = new THREE.PointLight(0xffc040, 16, 14, 2);
+      light.position.set(at.x, at.y + 3, at.z);
       this.scene.add(light);
-      this.glows.push({ mat, light, t: 0, base: 18 });
+      this.glows.push({ mat, light, t: 0, base: 16 });
       this.addFx(new Burst(at, { count: 180, color: 0xffc83d, speed: 20, up: 0.75, life: 1.7, size: 0.42, gravity: -24 }));
       this.addFx(new Burst(at, { count: 70, color: 0xffffff, speed: 11, up: 0.6, life: 1.1, size: 0.3, gravity: -18 }));
       this.addFx(new Shockwave(at, 0xffc83d, 0.9));

@@ -171,7 +171,15 @@ function addDie(s, d) {
   if (d > 0 && diceCount(pool) + (s === 100 ? 2 : 1) > MAX_DICE) return;
   pool[s] = next;
   if (!next) delete pool[s];
+  // Removing the last d20 from a mixed pool leaves nothing for ADV/DIS to act on.
+  if (s === 20 && !next && Object.keys(pool).length) adv = null;
   renderPool();
+}
+
+function toggleAdv(mode) {
+  adv = adv === mode ? null : mode;
+  if (adv && Object.keys(pool).length && !pool[20]) addDie(20, 1);
+  else renderPool();
 }
 
 const getMod = () => parseInt(modEl.value, 10) || 0;
@@ -184,9 +192,9 @@ function exprOf(p, mod, advMode) {
   return e;
 }
 
+// ADV/DIS doubles every d20 in the roll (an empty pool means a plain d20).
 function advApplies(p) {
-  const onlyD20 = !Object.keys(p).length || (Object.keys(p).length === 1 && p[20] === 1);
-  return adv && onlyD20 ? adv : null;
+  return adv && (!Object.keys(p).length || p[20]) ? adv : null;
 }
 
 function renderPool() {
@@ -216,9 +224,14 @@ document.querySelectorAll('[data-mod]').forEach((b) =>
   })
 );
 modEl.addEventListener('input', renderPool);
-$('#adv').addEventListener('click', () => { adv = adv === 'adv' ? null : 'adv'; renderPool(); });
-$('#dis').addEventListener('click', () => { adv = adv === 'dis' ? null : 'dis'; renderPool(); });
+$('#adv').addEventListener('click', () => toggleAdv('adv'));
+$('#dis').addEventListener('click', () => toggleAdv('dis'));
 $('#roll').addEventListener('click', roll);
+
+// Keep buttons from holding focus, so Space/Enter always means "roll" rather than re-clicking ADV etc.
+document.addEventListener('mousedown', (e) => {
+  if (e.target.closest('button')) e.preventDefault();
+});
 
 document.addEventListener('keydown', (e) => {
   if (e.target.closest('input, textarea') || e.repeat) return;
@@ -240,6 +253,12 @@ async function roll() {
   const mod = getMod();
   const advMode = advApplies(pool);
   const expr = exprOf(p, mod, advMode);
+
+  // Clear the selection now, so the next roll can be set up while these dice are still tumbling.
+  pool = {};
+  adv = null;
+  modEl.value = 0;
+  renderPool();
 
   const specs = [];
   const groups = [];
@@ -292,10 +311,6 @@ async function roll() {
   save();
   renderHistory();
 
-  pool = {};
-  adv = null;
-  modEl.value = 0;
-  renderPool();
   rolling = false;
   document.body.classList.remove('rolling');
 }

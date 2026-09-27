@@ -319,7 +319,9 @@ trayEl.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || !fontsLoaded) return;
   held = beginRoll();
   if (!held) return;
-  trayEl.setPointerCapture(e.pointerId);
+  try {
+    trayEl.setPointerCapture(e.pointerId);
+  } catch {}
   document.body.classList.add('holding');
   tray.grab(held.specs, e.clientX, e.clientY);
 });

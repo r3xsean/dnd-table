@@ -1,5 +1,5 @@
-import { DiceTray, SKINS } from './dice.js?v=10';
-import { sfx } from './sfx.js?v=10';
+import { DiceTray, SKINS } from './dice.js?v=11';
+import { sfx } from './sfx.js?v=11';
 
 const KEY = 'the-table-v1';
 const ORDER = [4, 6, 8, 10, 12, 20, 100];
@@ -224,7 +224,39 @@ const tray = new DiceTray(trayEl, {
     trayEl.classList.toggle('hype', on);
     if (on) sfx.slowmo();
   },
+  classifyHype: (f) => hypeMoments(f),
 });
+
+/**
+ * Given a forecast of the still-rolling d20s, the ticks of moments worth slow motion: a die landing
+ * on a 20 or 1 that decides its roll, or nearly landing on one that would have mattered.
+ * With advantage a near 1 only matters if the other die is also (nearly) a 1; with disadvantage, likewise a 20.
+ */
+function hypeMoments(f) {
+  const ticks = [];
+  const consider = (tick) => ticks.push(tick);
+  for (const g of new Set([...f.dice.keys()].map((d) => d.group))) {
+    const info = g.dice.map((d) => f.dice.get(d) ?? { value: d.value, calmTick: null, episodes: [] }); // settled partner: its real value
+    const pair = g.sides === 20 && info.length === 2;
+    const mode = pair ? set?.adv : null;
+    const finals = info.map((i) => i.value);
+    const kept = !pair ? finals[0] : mode === 'dis' ? Math.min(...finals) : Math.max(...finals);
+    info.forEach((i, k) => {
+      if (i.calmTick === null) return; // already settled
+      if ((kept === 20 || kept === 1) && i.value === kept) consider(i.calmTick);
+      for (const e of i.episodes) {
+        if (!pair) consider(e.tick);
+        else {
+          const other = info[1 - k];
+          const favoured = (mode === 'dis' ? 1 : 20) === e.value;
+          const otherToo = other.value === e.value || other.episodes.some((o) => o.value === e.value && o.start <= e.end && e.start <= o.end);
+          if (favoured || otherToo) consider(e.tick);
+        }
+      }
+    });
+  }
+  return ticks;
+}
 tray.setSkin(state.skin);
 
 const skinBtn = $('#skin');

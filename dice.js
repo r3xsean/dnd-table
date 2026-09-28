@@ -265,14 +265,18 @@ function getKind(sides, variant, skinName) {
 }
 
 const tmpV = new THREE.Vector3();
+const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
+const tmpQA = new THREE.Quaternion(), tmpQB = new THREE.Quaternion();
+const TICK = 1 / 120; // physics step, always the same size
 
-/** Which number is up, whether it's lying flat, and how high its lowest corner is off the floor. */
-function readDie(die) {
-  const q = die.mesh.quaternion;
-  const { def } = die;
+/**
+ * Which number is up, whether it's lying flat, and how high its lowest corner is off the floor.
+ * Takes a physics pose (cannon or three vectors both work), not the interpolated mesh.
+ */
+function readPose(def, position, q) {
   let low = Infinity;
   for (const v of def.verts) low = Math.min(low, tmpV.copy(v).applyQuaternion(q).y);
-  const bottom = die.mesh.position.y + low;
+  const bottom = position.y + low;
   if (def.sides === 4) {
     let best = -Infinity, value = 1;
     def.verts.forEach((v, i) => {
@@ -288,6 +292,106 @@ function readDie(die) {
     if (y > best) { best = y; value = f.value; }
   });
   return { value, flat: best > 0.97, bottom, top: best };
+}
+
+/**
+ * One physics tick of the "has it come to rest?" rule, shared by the real roll and the forecast.
+ * st holds { still, rollT }. Returns 'rolling', 'settled' or 'cocked' (resting but tilted or propped).
+ */
+function settleRule(st, def, body, dt, inHolder) {
+  st.rollT += dt;
+  // Resting dice keep a tiny physics jitter, so "still" means still to the eye, not exactly zero.
+  const calm = body.velocity.length() < 0.5 && body.angularVelocity.length() < 0.8;
+  st.still = calm ? st.still + dt : 0;
+  if (!(st.still > 0.2 && st.rollT > 0.5)) return { verdict: 'rolling' };
+  const r = readPose(def, body.position, body.quaternion);
+  const propped = r.bottom > (inHolder ? 0.6 : 0.15); // resting on another die
+  if (!r.flat || propped) return { verdict: st.still < 0.6 ? 'rolling' : 'cocked', r }; // may still tip over by itself
+  return { verdict: 'settled', r };
+}
+
+/** How close the d20's 20 or 1 face is to facing straight up (1 = flat on top), and which one. */
+function specialUp(def, q) {
+  let y = -1, value = 0;
+  for (const f of def.faces) {
+    if (f.value !== 20 && f.value !== 1) continue;
+    const fy = tmpV.copy(f.normal).applyQuaternion(q).y;
+    if (fy > y) { y = fy; value = f.value; }
+  }
+  return { y, value };
+}
+
+/**
+ * Near misses in a forecast die's final approach: runs of at least 50ms, in the 0.8s before it comes
+ * to rest, where the 20 or 1 face tips most of the way up (0.85; lying on a neighbouring face it sits at
+ * 0.745, balanced on the shared edge 0.934) while the die is slow and low — it rocks toward the 20 and falls
+ * back. Each is reported at its closest-to-flat tick. Landing on it isn't a near miss.
+ */
+function nearMisses(s) {
+  const out = [];
+  let run = null;
+  const close = () => {
+    if (run && run.end - run.start >= 5 && run.value !== s.value) out.push(run);
+    run = null;
+  };
+  for (const p of s.rec) {
+    if (p.tick < s.calmTick - 96 || p.tick > s.calmTick) continue;
+    const hot = p.near.y > 0.85 && p.v < 10 && p.w < 12 && p.bottom < 0.5; // (v < 10: sliding along 20-up counts)
+    if (!hot || (run && run.value !== p.near.value)) close();
+    if (!hot) continue;
+    if (!run) run = { value: p.near.value, start: p.tick, end: p.tick, tick: p.tick, best: p.near.y };
+    run.end = p.tick;
+    if (p.near.y > run.best) Object.assign(run, { tick: p.tick, best: p.near.y });
+  }
+  close();
+  return out;
+}
+
+/** Without the app's help: every moment a die lands on, or nearly lands on, a 20 or a 1. */
+function allMoments(f) {
+  const ticks = [];
+  for (const i of f.dice.values()) {
+    ticks.push(...i.episodes.map((e) => e.tick));
+    if (i.value === 20 || i.value === 1) ticks.push(i.calmTick);
+  }
+  return ticks;
+}
+
+/** A fresh copy of a physics body (own shapes, same material/mass/pose/motion) for the forecast world. */
+function cloneBody(b) {
+  const c = new CANNON.Body({
+    mass: 0,
+    type: b.type,
+    material: b.material,
+    linearDamping: b.linearDamping,
+    angularDamping: b.angularDamping,
+    collisionFilterGroup: b.collisionFilterGroup,
+    collisionFilterMask: b.collisionFilterMask,
+    collisionResponse: b.collisionResponse,
+    allowSleep: b.allowSleep,
+    sleepSpeedLimit: b.sleepSpeedLimit,
+    sleepTimeLimit: b.sleepTimeLimit,
+  });
+  b.shapes.forEach((s, i) => {
+    let copy;
+    if (s instanceof CANNON.Box) copy = new CANNON.Box(s.halfExtents.clone());
+    else if (s instanceof CANNON.ConvexPolyhedron) copy = new CANNON.ConvexPolyhedron({ vertices: s.vertices.map((v) => v.clone()), faces: s.faces });
+    else copy = new CANNON.Plane();
+    copy.material = s.material;
+    c.addShape(copy, b.shapeOffsets[i].clone(), b.shapeOrientations[i].clone());
+  });
+  // Copy mass and inertia as-is: recomputing them from the rotated bounding box would differ.
+  c.mass = b.mass;
+  c.invMass = b.invMass;
+  c.inertia.copy(b.inertia);
+  c.invInertia.copy(b.invInertia);
+  c.position.copy(b.position);
+  c.quaternion.copy(b.quaternion);
+  c.velocity.copy(b.velocity);
+  c.angularVelocity.copy(b.angularVelocity);
+  c.updateInertiaWorld(true);
+  c.aabbNeedsUpdate = true;
+  return c;
 }
 
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -635,6 +739,9 @@ export class DiceTray {
     this.camFocus = new THREE.Vector3();
     this.camSpread = 0;
     this.simTime = 0;
+    this.physicsAcc = 0; // simulation time not yet stepped
+    this.nextForecastAt = 0;
+    this.forecastMs = []; // recent forecast costs, for tuning
     this.skin = 'classic';
     this.dirty = true;
 
@@ -739,15 +846,30 @@ export class DiceTray {
       this.updateCandles(dt);
       this.updateHolder(dt);
       if (this.dice.length) {
-        // Shrink the step with the time scale so slow motion stays smooth instead of stuttering.
-        world.step((1 / 120) * this.timeScale, sdt, 12);
+        // Fixed-size physics ticks (so slow motion never changes where a die lands, and the forecast
+        // matches the real roll); slow motion just runs fewer ticks per frame and interpolates between them.
+        this.physicsAcc += sdt;
+        let ticks = 0;
+        while (this.physicsAcc >= TICK && ticks < 12) {
+          world.step(TICK);
+          this.throws = this.throws.filter((th) => !this.checkThrow(th, TICK));
+          this.physicsAcc -= TICK;
+          ticks++;
+        }
+        if (ticks === 12) this.physicsAcc = 0; // fell far behind (e.g. a stalled tab): don't try to catch up
+        const alpha = this.physicsAcc / TICK;
         for (const d of this.dice) {
           if (!d.inWorld || d.state === 'staged' || d.posed) continue; // posed by the hand / holder / ascension
-          d.mesh.position.copy(d.body.position);
-          d.mesh.quaternion.copy(d.body.quaternion);
-          if (d.body.type === CANNON.Body.DYNAMIC && d.body.sleepState !== CANNON.Body.SLEEPING) this.dirty = true;
+          const b = d.body;
+          if (b.type === CANNON.Body.DYNAMIC) {
+            d.mesh.position.lerpVectors(tmpA.copy(b.previousPosition), tmpB.copy(b.position), alpha);
+            d.mesh.quaternion.slerpQuaternions(tmpQA.copy(b.previousQuaternion), tmpQB.copy(b.quaternion), alpha);
+            if (b.sleepState !== CANNON.Body.SLEEPING) this.dirty = true;
+          } else {
+            d.mesh.position.copy(b.position);
+            d.mesh.quaternion.copy(b.quaternion);
+          }
         }
-        this.throws = this.throws.filter((th) => !this.checkThrow(th, sdt));
       }
       if (this.ascent) this.updateAscent(dt);
       this.updateTrails();
@@ -858,18 +980,82 @@ export class DiceTray {
     const live = this.dice.filter((d) => d.state !== 'done');
     if (!live.length || live.length > 2) return;
     if (live.some((d) => d.state !== 'rolling' || d.def.sides !== 20 || d.rollT < 0.3)) return;
-    if (live.some((d) => d.body.velocity.length() > 8 || d.body.angularVelocity.length() > 14 || d.body.position.y > 2.4)) return;
     if (live.length === 2 && live[0].body.position.distanceTo(live[1].body.position) > 7) return; // too far apart to frame
-    const teasing = live.some((d) => {
-      const r = readDie(d);
-      return r.top > 0.9 && (r.value === 20 || r.value === 1);
-    });
-    if (!teasing) return;
+    const now = performance.now();
+    if (now < this.nextForecastAt) return;
+    this.nextForecastAt = now + 125;
+    const f = this.forecast(live);
+    if (!f) return; // couldn't tell (it would need a nudge, or ran out of time)
+    // The app knows which dice count (advantage etc.); it answers with the ticks of moments worth watching.
+    // Start 0.15–0.6s ahead of one, so the slow motion covers the approach. Later ones: try again next time.
+    const moments = this.hooks.classifyHype ? this.hooks.classifyHype(f) : allMoments(f);
+    if (!moments.some((t) => t >= 18 && t <= 72)) return;
     this.hypeUsed = true;
     this.hype = { dice: live, t: 0, doneAt: 0 };
     this.camFocus.copy(live[0].mesh.position);
     this.camSpread = 0;
     this.hooks.onHype?.(true);
+  }
+
+  /**
+   * Play the rest of the roll forward in a throwaway copy of the physics world (the real roll is never
+   * touched) and report, for each still-rolling die: the value it lands on, the tick it comes to rest,
+   * and any near misses — stretches where it nearly settles on a 20 or a 1 before rolling off.
+   * Returns null when the outcome can't be told (a die would need a nudge, or it took too long).
+   */
+  forecast(live) {
+    const t0 = performance.now();
+    const w = new CANNON.World({ gravity: this.world.gravity.clone() });
+    w.allowSleep = this.world.allowSleep;
+    w.time = this.world.time;
+    for (const cm of this.world.contactmaterials) w.addContactMaterial(cm);
+    const copies = new Map();
+    for (const b of this.world.bodies) {
+      const c = cloneBody(b);
+      w.addBody(c);
+      c.sleepState = b.sleepState; // addBody resets these
+      c.timeLastSleepy = b.timeLastSleepy;
+      copies.set(b, c);
+    }
+    const runs = live.map((d) => ({ d, body: copies.get(d.body), still: d.still, rollT: d.rollT, rec: [], value: null, calmTick: null }));
+    const RECORD = 150; // keep the last ~1.25s of poses per die
+    // Look up to 1.2s ahead, but not past the real throw's 9s deadline (it would be read as-is there).
+    const elapsed = Math.max(...this.throws.filter((th) => th.dice.some((d) => live.includes(d))).map((th) => th.elapsed), 0);
+    const horizon = Math.min(144, Math.floor((9 - elapsed) / TICK));
+    for (let tick = 1; tick <= horizon; tick++) {
+      w.step(TICK);
+      for (const s of runs) {
+        if (s.value !== null) continue;
+        const b = s.body;
+        const r = readPose(s.d.def, b.position, b.quaternion);
+        s.rec.push({ tick, near: specialUp(s.d.def, b.quaternion), v: b.velocity.length(), w: b.angularVelocity.length(), bottom: r.bottom });
+        if (s.rec.length > RECORD) s.rec.shift();
+        const { verdict } = settleRule(s, s.d.def, b, TICK, this.inHolderAt(b.position));
+        if (verdict === 'cocked') return this.forecastDone(t0, null);
+        if (verdict === 'settled') {
+          s.value = r.value;
+          s.calmTick = tick - Math.round(s.still / TICK);
+          b.type = CANNON.Body.STATIC; // frozen, just like the real roll does
+          b.mass = 0;
+          b.updateMassProperties();
+          b.velocity.setZero();
+          b.angularVelocity.setZero();
+        }
+      }
+      if (runs.every((s) => s.value !== null)) break;
+      if (performance.now() - t0 > 4) return this.forecastDone(t0, null);
+    }
+    if (runs.some((s) => s.value === null)) return this.forecastDone(t0, null);
+
+    const dice = new Map();
+    for (const s of runs) dice.set(s.d, { value: s.value, calmTick: s.calmTick, episodes: nearMisses(s) });
+    return this.forecastDone(t0, { dice });
+  }
+
+  forecastDone(t0, result) {
+    this.forecastMs.push(performance.now() - t0);
+    if (this.forecastMs.length > 50) this.forecastMs.shift();
+    return result;
   }
 
   endHype() {
@@ -984,9 +1170,12 @@ export class DiceTray {
   }
 
   inHolder(d) {
+    return this.inHolderAt(d.body.position);
+  }
+
+  inHolderAt(p) {
     const h = this.holder;
     if (!h.body) return false;
-    const p = d.body.position;
     return Math.abs(p.x) < h.tw / 2 && Math.abs(p.z - h.tz) < h.td / 2;
   }
 
@@ -1039,9 +1228,13 @@ export class DiceTray {
     const b = d.body;
     b.type = CANNON.Body.DYNAMIC;
     b.mass = 1;
+    b.quaternion.set(0, 0, 0, 1); // inertia comes from the bounding box, so compute it unrotated
     b.updateMassProperties();
     b.position.copy(d.mesh.position);
     b.quaternion.copy(d.mesh.quaternion);
+    b.updateInertiaWorld(true);
+    b.previousPosition.copy(b.position); // start interpolating from here, not from an old pose
+    b.previousQuaternion.copy(b.quaternion);
     b.wakeUp();
   }
 
@@ -1328,16 +1521,14 @@ export class DiceTray {
     const timeout = th.elapsed > 9;
     for (const d of th.dice) {
       if (d.state !== 'rolling') continue;
-      d.rollT += dt;
       const b = d.body;
-      // Resting dice keep a tiny physics jitter, so "still" means still to the eye, not exactly zero.
-      const calm = b.velocity.length() < 0.5 && b.angularVelocity.length() < 0.8;
-      d.still = calm ? d.still + dt : 0;
-      if (!timeout && !(d.still > 0.2 && d.rollT > 0.5)) continue;
-      const r = readDie(d);
-      const propped = r.bottom > (this.inHolder(d) ? 0.6 : 0.15); // resting on another die
-      if ((!r.flat || propped) && !timeout) {
-        if (d.still < 0.6) continue; // it may still be tipping over by itself
+      const { verdict, r } = settleRule(d, d.def, b, dt, this.inHolder(d));
+      if (timeout) {
+        this.settle(d, (r ?? readPose(d.def, b.position, b.quaternion)).value);
+        continue;
+      }
+      if (verdict === 'rolling') continue;
+      if (verdict === 'cocked') {
         if (d.nudges >= 4) {
           this.settle(d, r.value);
           continue;

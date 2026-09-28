@@ -1,5 +1,5 @@
-import { DiceTray } from './dice.js?v=6';
-import { sfx } from './sfx.js?v=6';
+import { DiceTray } from './dice.js?v=7';
+import { sfx } from './sfx.js?v=7';
 
 const KEY = 'the-table-v1';
 const ORDER = [4, 6, 8, 10, 12, 20, 100];
@@ -380,20 +380,20 @@ async function roll() {
   groups.forEach(groupRolled);
 }
 
-// Throw one die by hand: press on it, drag, let go.
-let held = null;
+// Throw by hand: press on any waiting die to scoop up all of them (Shift: just that one), drag, let go.
+let held = null; // groups in the hand
 trayEl.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || held) return;
   const d = tray.pick(e.clientX, e.clientY);
   if (!d) return;
   sfx.unlock();
-  held = d.group;
-  held.state = 'held';
+  held = e.shiftKey ? [d.group] : set.groups.filter((g) => g.state === 'staged');
+  held.forEach((g) => (g.state = 'held'));
   try {
     trayEl.setPointerCapture(e.pointerId);
   } catch {}
   document.body.classList.add('holding');
-  tray.grab(held.dice, e.clientX, e.clientY);
+  tray.grab(held.flatMap((g) => g.dice), e.clientX, e.clientY);
   renderPool();
 });
 trayEl.addEventListener('pointermove', (e) => {
@@ -402,13 +402,13 @@ trayEl.addEventListener('pointermove', (e) => {
 });
 const letGo = async () => {
   if (!held) return;
-  const g = held;
+  const groups = held;
   held = null;
   document.body.classList.remove('holding');
-  g.state = 'rolling';
+  groups.forEach((g) => (g.state = 'rolling'));
   renderPool();
   await tray.release();
-  groupRolled(g);
+  groups.forEach(groupRolled);
 };
 trayEl.addEventListener('pointerup', letGo);
 trayEl.addEventListener('pointercancel', letGo);

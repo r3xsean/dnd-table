@@ -1,5 +1,5 @@
-import { DiceTray } from './dice.js';
-import { sfx } from './sfx.js';
+import { DiceTray } from './dice.js?v=6';
+import { sfx } from './sfx.js?v=6';
 
 const KEY = 'the-table-v1';
 const ORDER = [4, 6, 8, 10, 12, 20, 100];

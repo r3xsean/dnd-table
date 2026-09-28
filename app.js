@@ -1,5 +1,5 @@
-import { DiceTray } from './dice.js?v=8';
-import { sfx } from './sfx.js?v=8';
+import { DiceTray, SKINS } from './dice.js?v=9';
+import { sfx } from './sfx.js?v=9';
 
 const KEY = 'the-table-v1';
 const ORDER = [4, 6, 8, 10, 12, 20, 100];
@@ -17,11 +17,13 @@ const ICONS = {
 
 const $ = (s, el = document) => el.querySelector(s);
 const uid = () => Math.random().toString(36).slice(2, 9);
+const clampHp = (hp, max) => Math.min(max, Math.max(0, hp));
 
 const defaults = () => ({
   title: 'The Table',
   players: [1, 2, 3].map((n) => ({ id: uid(), name: `Player ${n}`, hp: 10, max: 10, notes: '' })),
   history: [],
+  skin: 'classic',
 });
 
 function load() {
@@ -109,11 +111,10 @@ function playerCard(p) {
     el.classList.add(cls === 'dmg' ? 'flash-hit' : 'flash-heal');
   };
 
-  const change = (sign) => {
-    const n = Math.abs(parseInt(amt.value, 10)) || 1;
+  /** Add delta to HP (clamped to 0…max), with effects. */
+  const change = (delta) => {
     const before = p.hp;
-    p.hp = sign < 0 ? Math.max(0, p.hp - n) : Math.min(p.max, Math.max(0, p.hp) + n);
-    amt.value = '';
+    p.hp = clampHp(p.hp + delta, p.max);
     const diff = p.hp - before;
     if (diff) float(`${diff > 0 ? '+' : '−'}${Math.abs(diff)}`, diff > 0 ? 'heal' : 'dmg');
     sfx.unlock();
@@ -130,13 +131,25 @@ function playerCard(p) {
     save();
   };
 
+  // An empty box means 1; an explicit 0 means nothing.
+  const typed = () => (amt.value.trim() === '' ? 1 : Math.abs(parseInt(amt.value, 10)) || 0);
+  const fromBox = (sign) => {
+    change(sign * typed());
+    amt.value = '';
+  };
+
   name.addEventListener('input', () => { p.name = name.value; save(); });
-  cur.addEventListener('change', () => { p.hp = parseInt(cur.value, 10) || 0; refresh(); save(); });
-  max.addEventListener('change', () => { p.max = Math.max(1, parseInt(max.value, 10) || 1); refresh(); save(); });
-  $('.hit', el).addEventListener('click', () => change(-1));
-  $('.heal', el).addEventListener('click', () => change(1));
+  cur.addEventListener('change', () => { p.hp = clampHp(parseInt(cur.value, 10) || 0, p.max); refresh(); save(); });
+  max.addEventListener('change', () => {
+    p.max = Math.max(1, parseInt(max.value, 10) || 1);
+    p.hp = clampHp(p.hp, p.max);
+    refresh();
+    save();
+  });
+  $('.hit', el).addEventListener('click', () => fromBox(-1));
+  $('.heal', el).addEventListener('click', () => fromBox(1));
   amt.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') change(e.shiftKey ? 1 : -1);
+    if (e.key === 'Enter') fromBox(e.shiftKey ? 1 : -1);
   });
 
   const grow = () => {
@@ -203,7 +216,34 @@ function splash(kind, name, amount) {
 const tray = new DiceTray(trayEl, {
   onImpact: (speed, kind) => sfx.clack(speed, kind),
   onThrow: (strength) => sfx.whoosh(strength),
+  // Each die is scored the moment it lands; a pair (d100, advantage) once both have.
+  onSettle: (d) => {
+    if (d.group.dice.every((x) => x.state === 'done')) groupRolled(d.group);
+  },
+  onHype: (on) => {
+    trayEl.classList.toggle('hype', on);
+    if (on) sfx.slowmo();
+  },
 });
+tray.setSkin(state.skin);
+
+const skinBtn = $('#skin');
+const renderSkin = () => {
+  const s = SKINS[tray.skin];
+  skinBtn.querySelector('span').textContent = s.label;
+  skinBtn.style.setProperty('--swatch', s.swatch);
+};
+skinBtn.addEventListener('click', () => {
+  const names = Object.keys(SKINS);
+  state.skin = names[(names.indexOf(tray.skin) + 1) % names.length];
+  tray.setSkin(state.skin);
+  save();
+  renderSkin();
+  sfx.unlock();
+  sfx.clack(8, 'dice');
+});
+renderSkin();
+
 let fontsLoaded = false;
 const fontsReady = document.fonts
   .load('100px Anton')
@@ -211,6 +251,7 @@ const fontsReady = document.fonts
   .then(() => (fontsLoaded = true));
 
 let adv = null;
+let clearGen = 0; // bumped by Clear
 // The current roll: dice groups sitting on / thrown across the table. A group is one die, or the two
 // dice that make one roll (d100 tens+ones, or a d20 with advantage). state: staged → held → rolling → done.
 let set = null;
@@ -247,7 +288,11 @@ function specsFor(sides) {
 }
 
 function addDie(sides) {
-  if (!fontsLoaded) return;
+  if (!fontsLoaded) {
+    // Still loading the dice font: add it once that's done, unless the table was cleared meanwhile.
+    const gen = clearGen;
+    return void fontsReady.then(() => gen === clearGen && addDie(sides));
+  }
   sfx.unlock();
   const s = liveSet() ?? newSet();
   const specs = specsFor(sides);
@@ -286,7 +331,7 @@ function toggleAdv(mode) {
       while (g.dice.length < want) g.dice.push(Object.assign(tray.stage({ sides: 20 }), { group: g }));
     }
   }
-  if (adv && !s?.groups.some((x) => x.sides === 20)) addDie(20);
+  if (adv && fontsLoaded && !s?.groups.some((x) => x.sides === 20)) addDie(20);
   else renderPool();
 }
 
@@ -327,6 +372,7 @@ function renderPool() {
 }
 
 $('#clear-pool').addEventListener('click', () => {
+  clearGen++;
   tray.clear();
   set = null;
   held = null;
@@ -357,7 +403,8 @@ document.addEventListener('mousedown', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.target.closest('input, textarea') || e.repeat) return;
+  // A keyboard-focused button keeps its own Enter/Space.
+  if (e.target.closest('input, textarea, button') || e.repeat) return;
   if (e.code === 'Space' || e.key === 'Enter') {
     e.preventDefault();
     roll();
@@ -365,7 +412,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 /** Roll everything still waiting on the table (or a d20 if the table is empty). */
-async function roll() {
+function roll() {
   if (!fontsLoaded) return;
   sfx.unlock();
   if (!liveSet()) {
@@ -376,8 +423,7 @@ async function roll() {
   if (!groups.length) return;
   groups.forEach((g) => (g.state = 'rolling'));
   renderPool();
-  await tray.toss(groups.flatMap((g) => g.dice));
-  groups.forEach(groupRolled);
+  tray.toss(groups.flatMap((g) => g.dice));
 }
 
 // Throw by hand: press on any waiting die to scoop up all of them (Shift: just that one), drag, let go.
@@ -400,15 +446,13 @@ trayEl.addEventListener('pointermove', (e) => {
   if (held) tray.moveHand(e.clientX, e.clientY);
   else trayEl.classList.toggle('can-grab', !!tray.pick(e.clientX, e.clientY));
 });
-const letGo = async () => {
+const letGo = () => {
   if (!held) return;
-  const groups = held;
+  held.forEach((g) => (g.state = 'rolling'));
   held = null;
   document.body.classList.remove('holding');
-  groups.forEach((g) => (g.state = 'rolling'));
   renderPool();
-  await tray.release();
-  groups.forEach(groupRolled);
+  tray.release();
 };
 trayEl.addEventListener('pointerup', letGo);
 trayEl.addEventListener('pointercancel', letGo);
@@ -420,7 +464,7 @@ trayEl.addEventListener('contextmenu', (e) => {
 
 /** A group's dice have landed: score it, fire crit/fumble effects, and update the running total. */
 function groupRolled(g) {
-  if (!set || set.done || !set.groups.includes(g)) return; // table was cleared meanwhile
+  if (!set || set.done || !set.groups.includes(g) || g.state === 'done') return; // table was cleared meanwhile
   const [a, b] = g.dice.map((d) => d.value);
   let kept = g.dice[0];
   if (g.sides === 100) g.value = (a % 10) * 10 + (b % 10) || 100;
@@ -494,9 +538,12 @@ function finishSet() {
 }
 
 let shownTotal = 0;
+let countToken = 0;
 function countUp(el, from, to) {
   const start = performance.now(), dur = 500;
+  const token = ++countToken; // a newer count takes over from this one
   const step = (now) => {
+    if (token !== countToken) return;
     const t = Math.min(1, (now - start) / dur);
     el.textContent = Math.round(from + (to - from) * (1 - (1 - t) ** 3));
     if (t < 1) requestAnimationFrame(step);

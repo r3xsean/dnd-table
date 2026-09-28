@@ -8,11 +8,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Anton&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
   <!-- Bump ?v= on every release so browsers never mix old and new files. -->
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=9">
   <script type="importmap">
     {
       "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
         "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
       }
     }
@@ -23,6 +24,7 @@
     <div class="logo">D20</div>
     <input id="title" class="title" spellcheck="false" aria-label="Campaign name">
     <div class="spacer"></div>
+    <button id="skin" class="btn ghost skin-btn" title="Change the dice finish"><i></i><span>Classic</span></button>
     <button id="sound" class="btn ghost">Sound on</button>
     <button id="long-rest" class="btn ghost">Long rest</button>
   </header>
@@ -39,6 +41,7 @@
     <section class="stage">
       <div id="tray" class="tray">
         <div id="flash" class="flash"></div>
+        <div class="cine"></div>
         <div class="hint">Click dice below to fill the tray · drag them out to throw · Shift-drag throws just one</div>
         <div id="result" class="result">
           <div class="result-tag"></div>
@@ -99,6 +102,6 @@
     </article>
   </template>
 
-  <script type="module" src="app.js?v=8"></script>
+  <script type="module" src="app.js?v=9"></script>
 </body>
 </html>

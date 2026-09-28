@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const PHI = (1 + Math.sqrt(5)) / 2;
 const D10_H = 1.15;
@@ -48,9 +49,28 @@ const SIZE = { 4: 1.5, 6: 1.1, 8: 1.3, 10: 1.25, 12: 1.3, 20: 1.35 };
 const LABEL_SIZE = { 6: 0.52, 8: 0.36, 10: 0.36, 12: 0.4, 20: 0.3 };
 const LABEL_DY = { 8: -0.03, 10: -0.07, 20: -0.02 };
 
-const THEMES = {
-  normal: { body: '#e0263b', edge: 0x5a0712, ink: '#ffffff' },
-  tens: { body: '#17171d', edge: 0x000000, ink: '#ffd23f' },
+// Dice finishes. `tens` is the contrasting die that reads the tens digit of a d100.
+export const SKINS = {
+  classic: {
+    label: 'Classic', swatch: '#e0263b', trail: 0xff5a3c,
+    normal: { body: '#e0263b', edge: 0x5a0712, ink: '#ffffff' },
+    tens: { body: '#17171d', edge: 0x000000, ink: '#ffd23f' },
+  },
+  ruby: {
+    label: 'Ruby', swatch: '#9a0b28', trail: 0xff2d55, gloss: true,
+    normal: { body: '#8f0a24', edge: 0x2a0008, ink: '#ffd98a' },
+    tens: { body: '#efe4cc', edge: 0x6b4b1a, ink: '#8f0a24' },
+  },
+  obsidian: {
+    label: 'Obsidian', swatch: '#1b1822', trail: 0xffc83d, gloss: true,
+    normal: { body: '#0d0b11', edge: 0x000000, ink: '#ffd23f' },
+    tens: { body: '#6b1022', edge: 0x1a0005, ink: '#ffffff' },
+  },
+  steel: {
+    label: 'Steel', swatch: '#b9bcc4', trail: 0xbfe3ff, metal: true,
+    normal: { body: '#aeb2bb', edge: 0x2b2d33, ink: '#17181c' },
+    tens: { body: '#c9a24a', edge: 0x3a2c0c, ink: '#17181c' },
+  },
 };
 
 function findFaces(V) {
@@ -127,6 +147,8 @@ function getDef(sides) {
     }
     up.normalize();
     const right = up.clone().cross(f.normal).normalize();
+    f.up = up; // the direction the face's label reads upright
+    f.right = right;
     // 2D coords of each vertex relative to the texture cell center (cell units, y up)
     f.local = f.idx.map((i) => {
       const p = verts[i].clone().sub(f.center);
@@ -156,47 +178,22 @@ function drawLabel(ctx, text, x, y, angle, size, color, underline) {
   ctx.restore();
 }
 
-const kinds = {};
-function getKind(sides, variant) {
-  const key = sides + variant;
-  if (kinds[key]) return kinds[key];
+let envMap = null; // reflections for the shiny finishes; built once the renderer exists
+
+// Geometry and texture layout per die shape (shared by every finish).
+const shapes = {};
+function getShape(sides) {
+  if (shapes[sides]) return shapes[sides];
   const def = getDef(sides);
-  const theme = THEMES[variant];
   const n = def.faces.length;
   const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
-  const canvas = document.createElement('canvas');
-  canvas.width = cols * CELL;
-  canvas.height = rows * CELL;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = theme.body;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const toCanvas = (fi, [x, y]) => [((fi % cols) + 0.5 + x) * CELL, (Math.floor(fi / cols) + 0.5 - y) * CELL];
 
   const pos = [], nor = [], uv = [];
   def.faces.forEach((f, fi) => {
-    const col = fi % cols, row = Math.floor(fi / cols);
-    const toCanvas = ([x, y]) => [(col + 0.5 + x) * CELL, (row + 0.5 - y) * CELL];
-
-    if (sides === 4) {
-      f.idx.forEach((vi, k) => {
-        const [x, y] = f.local[k];
-        const [cx, cy] = toCanvas([x * 0.58, y * 0.58]);
-        drawLabel(ctx, String(vi + 1), cx, cy, Math.atan2(x, y), CELL * 0.19, theme.ink, false);
-      });
-    } else {
-      let label = String(f.value);
-      let size = LABEL_SIZE[sides];
-      if (sides === 10) {
-        label = variant === 'tens' ? String((f.value % 10) * 10).padStart(2, '0') : String(f.value % 10);
-        if (variant === 'tens') size = 0.3;
-      }
-      const [cx, cy] = toCanvas([0, LABEL_DY[sides] || 0]);
-      const underline = sides >= 10 && (label === '6' || label === '9');
-      drawLabel(ctx, label, cx, cy, 0, size * CELL, theme.ink, underline);
-    }
-
     const uvs = f.local.map((p) => {
-      const [cx, cy] = toCanvas(p);
-      return [cx / canvas.width, 1 - cy / canvas.height];
+      const [cx, cy] = toCanvas(fi, p);
+      return [cx / (cols * CELL), 1 - cy / (rows * CELL)];
     });
     const P = f.idx.map((i) => def.verts[i]);
     for (let t = 1; t < P.length - 1; t++) {
@@ -207,41 +204,95 @@ function getKind(sides, variant) {
       }
     }
   });
-
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geometry.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
   geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  const material = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.35, metalness: 0.05 });
   const edges = new THREE.EdgesGeometry(geometry, 1);
-  const edgeMat = new THREE.LineBasicMaterial({ color: theme.edge, transparent: true, opacity: 0.6 });
-  return (kinds[key] = { def, geometry, material, edges, edgeMat });
+  return (shapes[sides] = { def, geometry, edges, cols, rows, toCanvas });
 }
 
+const kinds = {};
+function getKind(sides, variant, skinName) {
+  const key = `${sides}-${variant}-${skinName}`;
+  if (kinds[key]) return kinds[key];
+  const { def, geometry, edges, cols, rows, toCanvas } = getShape(sides);
+  const skin = SKINS[skinName];
+  const theme = skin[variant];
+  const canvas = document.createElement('canvas');
+  canvas.width = cols * CELL;
+  canvas.height = rows * CELL;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = theme.body;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  def.faces.forEach((f, fi) => {
+    if (sides === 4) {
+      f.idx.forEach((vi, k) => {
+        const [x, y] = f.local[k];
+        const [cx, cy] = toCanvas(fi, [x * 0.58, y * 0.58]);
+        drawLabel(ctx, String(vi + 1), cx, cy, Math.atan2(x, y), CELL * 0.19, theme.ink, false);
+      });
+      return;
+    }
+    let label = String(f.value);
+    let size = LABEL_SIZE[sides];
+    if (sides === 10) {
+      label = variant === 'tens' ? String((f.value % 10) * 10).padStart(2, '0') : String(f.value % 10);
+      if (variant === 'tens') size = 0.3;
+    }
+    const [cx, cy] = toCanvas(fi, [0, LABEL_DY[sides] || 0]);
+    const underline = sides >= 10 && (label === '6' || label === '9');
+    drawLabel(ctx, label, cx, cy, 0, size * CELL, theme.ink, underline);
+  });
+
+  const map = new THREE.CanvasTexture(canvas);
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.anisotropy = 8;
+  let material;
+  if (skin.metal) {
+    material = new THREE.MeshStandardMaterial({ map, roughness: 0.25, metalness: 1, envMap, envMapIntensity: 0.75 });
+  } else if (skin.gloss) {
+    // Keep reflections faint: seen from above, the environment's bright ceiling washes the colour out.
+    material = new THREE.MeshPhysicalMaterial({
+      map, roughness: 0.35, metalness: 0, clearcoat: 0.8, clearcoatRoughness: 0.08, envMap, envMapIntensity: 0.18,
+    });
+  } else {
+    material = new THREE.MeshStandardMaterial({ map, roughness: 0.35, metalness: 0.05 });
+  }
+  const edgeMat = new THREE.LineBasicMaterial({ color: theme.edge, transparent: true, opacity: 0.6 });
+  return (kinds[key] = { def, geometry, edges, material, edgeMat });
+}
+
+const tmpV = new THREE.Vector3();
+
+/** Which number is up, whether it's lying flat, and how high its lowest corner is off the floor. */
 function readDie(die) {
   const q = die.mesh.quaternion;
   const { def } = die;
+  let low = Infinity;
+  for (const v of def.verts) low = Math.min(low, tmpV.copy(v).applyQuaternion(q).y);
+  const bottom = die.mesh.position.y + low;
   if (def.sides === 4) {
     let best = -Infinity, value = 1;
     def.verts.forEach((v, i) => {
-      const y = v.clone().applyQuaternion(q).y;
+      const y = tmpV.copy(v).applyQuaternion(q).y;
       if (y > best) { best = y; value = i + 1; }
     });
-    const flat = def.faces.some((f) => f.normal.clone().applyQuaternion(q).y < -0.97);
-    return { value, flat };
+    const flat = def.faces.some((f) => tmpV.copy(f.normal).applyQuaternion(q).y < -0.97);
+    return { value, flat, bottom, top: flat ? 1 : 0 };
   }
   let best = -Infinity, value = 1;
   def.faces.forEach((f) => {
-    const y = f.normal.clone().applyQuaternion(q).y;
+    const y = tmpV.copy(f.normal).applyQuaternion(q).y;
     if (y > best) { best = y; value = f.value; }
   });
-  return { value, flat: best > 0.97 };
+  return { value, flat: best > 0.97, bottom, top: best };
 }
 
 const rand = (a, b) => a + Math.random() * (b - a);
+const smooth = (t) => t * t * (3 - 2 * t);
+const clamp01 = (t) => Math.min(1, Math.max(0, t));
 
 const HAND_Y = 4.5;
 const SLOT = 2.6; // spacing of dice in the holder
@@ -253,19 +304,135 @@ const handOffset = (i) => {
   return new THREE.Vector3(x * HAND_GAP, Math.floor(i / 7) * HAND_GAP, z * HAND_GAP);
 };
 
-let sparkTex;
-function getSparkTex() {
-  if (sparkTex) return sparkTex;
+const SLOW_MO = 0.25; // physics speed during the hype cam
+const RISE = 0.55, HOVER = 1.5, FALL = 0.6; // nat-20 ascension timing (seconds)
+
+function canvasTex(size, draw) {
   const c = document.createElement('canvas');
-  c.width = c.height = 64;
-  const ctx = c.getContext('2d');
-  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-  g.addColorStop(0, 'rgba(255,255,255,1)');
-  g.addColorStop(0.25, 'rgba(255,255,255,0.85)');
-  g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, 64, 64);
-  return (sparkTex = new THREE.CanvasTexture(c));
+  c.width = c.height = size;
+  draw(c.getContext('2d'), size);
+  return new THREE.CanvasTexture(c);
+}
+
+let sparkTex, emberTex, sigilTex;
+const getSparkTex = () =>
+  (sparkTex ??= canvasTex(64, (ctx) => {
+    const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.25, 'rgba(255,255,255,0.85)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 64, 64);
+  }));
+
+// A chunky diamond with a soft halo, so embers read as fragments rather than fuzz.
+const getEmberTex = () =>
+  (emberTex ??= canvasTex(64, (ctx) => {
+    const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, 'rgba(255,255,255,0.5)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.moveTo(32, 12);
+    ctx.lineTo(46, 32);
+    ctx.lineTo(32, 52);
+    ctx.lineTo(18, 32);
+    ctx.closePath();
+    ctx.fill();
+  }));
+
+// The magic circle under an ascending nat 20.
+const getSigilTex = () =>
+  (sigilTex ??= canvasTex(512, (ctx) => {
+    ctx.translate(256, 256);
+    ctx.strokeStyle = ctx.fillStyle = '#fff';
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 16;
+    const ring = (r, w) => {
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+    };
+    ring(232, 12);
+    ring(200, 4);
+    ring(118, 5);
+    for (let i = 0; i < 20; i++) {
+      ctx.save();
+      ctx.rotate((i / 20) * Math.PI * 2);
+      ctx.fillRect(-4, -226, 8, i % 5 ? 16 : 26);
+      ctx.restore();
+    }
+    ctx.lineWidth = 6;
+    for (const off of [0, Math.PI]) {
+      ctx.beginPath();
+      for (let k = 0; k < 3; k++) {
+        const a = off + (k / 3) * Math.PI * 2 - Math.PI / 2;
+        ctx[k ? 'lineTo' : 'moveTo'](Math.cos(a) * 200, Math.sin(a) * 200);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+  }));
+
+/** Dark planks with broad grain (fine detail turns to mush on a compressed stream). Tiles seamlessly. */
+function woodTexture(renderer) {
+  const TAU = Math.PI * 2;
+  const tex = canvasTex(1024, (ctx, S) => {
+    const planks = 6, ph = S / planks;
+    for (let i = 0; i < planks; i++) {
+      const y0 = i * ph;
+      const seam = Math.round(rand(0.2, 0.8) * S);
+      for (const [x0, x1] of [[0, seam], [seam, S]]) {
+        ctx.fillStyle = `hsl(${rand(16, 24)} ${rand(30, 42)}% ${rand(9, 14)}%)`;
+        ctx.fillRect(x0, y0, x1 - x0, ph);
+      }
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, y0, S, ph);
+      ctx.clip();
+      for (let k = 0; k < 26; k++) {
+        const yb = y0 + rand(-10, ph + 10);
+        const a1 = rand(2, 8), f1 = (TAU * Math.ceil(rand(0.01, 3))) / S, p1 = rand(0, TAU);
+        const a2 = rand(0.5, 2), f2 = (TAU * Math.ceil(rand(4, 11))) / S, p2 = rand(0, TAU);
+        ctx.beginPath();
+        for (let x = 0; x <= S; x += 8) {
+          const y = yb + a1 * Math.sin(x * f1 + p1) + a2 * Math.sin(x * f2 + p2);
+          x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        const dark = Math.random() < 0.7;
+        ctx.strokeStyle = dark ? `rgba(0,0,0,${rand(0.12, 0.3)})` : `rgba(255,205,160,${rand(0.03, 0.07)})`;
+        ctx.lineWidth = rand(1, 4);
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0, y0, S, 3);
+      ctx.fillRect(0, y0, 3, ph);
+      ctx.fillRect(seam - 1, y0, 3, ph);
+      ctx.fillStyle = 'rgba(255,210,170,0.05)';
+      ctx.fillRect(0, y0 + 3, S, 1);
+    }
+    // Broad light/dark patches, drawn wrapped so the tile stays seamless.
+    for (let k = 0; k < 10; k++) {
+      const x = rand(0, S), y = rand(0, S), r = rand(120, 320);
+      const light = Math.random() < 0.5;
+      for (const dx of [-S, 0, S]) for (const dy of [-S, 0, S]) {
+        const g = ctx.createRadialGradient(x + dx, y + dy, 0, x + dx, y + dy, r);
+        g.addColorStop(0, light ? 'rgba(255,190,140,0.05)' : 'rgba(0,0,0,0.18)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(x + dx - r, y + dy - r, 2 * r, 2 * r);
+      }
+    }
+  });
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(19, 19);
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  return tex;
 }
 
 class Burst {
@@ -305,6 +472,71 @@ class Burst {
   dispose() { this.geo.dispose(); this.mat.dispose(); }
 }
 
+/** Gold fragments that shower up, bounce, and smoulder on the table for a few seconds. */
+class Embers {
+  constructor(origin, { count = 80, color = 0xffc23d } = {}) {
+    this.age = 0;
+    this.color = new THREE.Color(color);
+    this.pos = new Float32Array(count * 3);
+    this.col = new Float32Array(count * 3);
+    this.parts = [];
+    for (let i = 0; i < count; i++) {
+      const a = rand(0, Math.PI * 2), h = rand(1.5, 9);
+      this.parts.push({
+        v: new THREE.Vector3(Math.cos(a) * h, rand(10, 26), Math.sin(a) * h),
+        life: rand(2.4, 4.6),
+        phase: rand(0, 6.3),
+        rate: rand(5, 13),
+        grounded: false,
+      });
+      this.pos.set([origin.x + rand(-0.4, 0.4), origin.y + 0.4, origin.z + rand(-0.4, 0.4)], i * 3);
+    }
+    this.maxLife = Math.max(...this.parts.map((p) => p.life));
+    this.geo = new THREE.BufferGeometry();
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
+    this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3));
+    this.mat = new THREE.PointsMaterial({
+      size: 0.6, map: getEmberTex(), vertexColors: true, transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.obj = new THREE.Points(this.geo, this.mat);
+  }
+  update(dt) {
+    this.age += dt;
+    const P = this.pos, C = this.col;
+    this.parts.forEach((q, i) => {
+      const k = i * 3, v = q.v;
+      if (q.grounded) {
+        v.multiplyScalar(Math.exp(-dt * 8));
+      } else {
+        v.y -= 28 * dt;
+        v.x *= Math.exp(-dt * 0.8);
+        v.z *= Math.exp(-dt * 0.8);
+      }
+      P[k] += v.x * dt;
+      P[k + 1] += v.y * dt;
+      P[k + 2] += v.z * dt;
+      if (!q.grounded && P[k + 1] < 0.08) {
+        P[k + 1] = 0.08;
+        v.y *= -0.35;
+        v.x *= 0.5;
+        v.z *= 0.5;
+        if (v.y < 1.5) { v.y = 0; q.grounded = true; }
+      }
+      const t = this.age / q.life;
+      const fade = t < 0.6 ? 1 : Math.max(0, 1 - (t - 0.6) / 0.4);
+      const b = fade * (0.65 + 0.35 * Math.sin(this.age * q.rate + q.phase));
+      C[k] = this.color.r * b;
+      C[k + 1] = this.color.g * b;
+      C[k + 2] = this.color.b * b;
+    });
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.color.needsUpdate = true;
+    return this.age < this.maxLife;
+  }
+  dispose() { this.geo.dispose(); this.mat.dispose(); }
+}
+
 class Shockwave {
   constructor(origin, color, life = 0.8) {
     this.age = 0;
@@ -326,8 +558,66 @@ class Shockwave {
   dispose() { this.geo.dispose(); this.mat.dispose(); }
 }
 
+const TRAIL_N = 24;
+const TRAIL_LIFE = 0.22; // seconds of (simulation) time a streak lingers
+
+/** A short tapered ribbon behind a flying die, always turned to face the camera. */
+class Trail {
+  constructor(color, width) {
+    this.pts = [];
+    this.width = width;
+    this.color = new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.3); // a hot core reads better
+    this.pos = new Float32Array(TRAIL_N * 6);
+    this.col = new Float32Array(TRAIL_N * 8);
+    const idx = [];
+    for (let i = 0; i < TRAIL_N - 1; i++) {
+      const a = i * 2;
+      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+    this.geo = new THREE.BufferGeometry();
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
+    this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 4));
+    this.geo.setIndex(idx);
+    this.mat = new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.obj = new THREE.Mesh(this.geo, this.mat);
+    this.obj.frustumCulled = false;
+  }
+  /** Returns false once the streak has fully faded. */
+  update(now, head, emitting, camPos) {
+    const pts = this.pts;
+    if (emitting && (!pts.length || pts[0].p.distanceToSquared(head) > 0.03)) pts.unshift({ p: head.clone(), t: now });
+    while (pts.length && (pts.length > TRAIL_N - 1 || now - pts[pts.length - 1].t > TRAIL_LIFE)) pts.pop();
+    const list = emitting && pts[0].p.distanceToSquared(head) > 1e-6 ? [{ p: head, t: now }, ...pts] : pts;
+    const n = Math.min(list.length, TRAIL_N);
+    this.geo.setDrawRange(0, Math.max(0, n - 1) * 6);
+    if (n < 2) return pts.length > 0;
+    const dir = new THREE.Vector3(), side = new THREE.Vector3(), view = new THREE.Vector3();
+    for (let i = 0; i < n; i++) {
+      const p = list[i].p;
+      dir.subVectors(list[Math.max(0, i - 1)].p, list[Math.min(n - 1, i + 1)].p);
+      view.subVectors(camPos, p);
+      side.crossVectors(dir, view).normalize();
+      const f = clamp01(1 - (now - list[i].t) / TRAIL_LIFE) * (1 - i / n) ** 0.6;
+      side.multiplyScalar((this.width / 2) * f);
+      this.pos.set([p.x + side.x, p.y + side.y, p.z + side.z, p.x - side.x, p.y - side.y, p.z - side.z], i * 6);
+      const a = 0.7 * f;
+      const { r, g, b } = this.color;
+      this.col.set([r, g, b, a, r, g, b, a], i * 8);
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.color.needsUpdate = true;
+    return true;
+  }
+  dispose() { this.geo.dispose(); this.mat.dispose(); }
+}
+
 export class DiceTray {
-  /** hooks: { onImpact(speed, 'dice'|'floor'|'wall'), onThrow(strength 0-1) } */
+  /**
+   * hooks: { onImpact(speed, 'dice'|'floor'|'wall'), onThrow(strength 0-1), onSettle(die), onHype(on) }
+   * onSettle fires as each thrown die comes to rest, with die.value set.
+   */
   constructor(el, hooks = {}) {
     this.el = el;
     this.hooks = hooks;
@@ -335,7 +625,17 @@ export class DiceTray {
     this.throws = []; // in-flight throws waiting to settle
     this.fx = [];
     this.glows = [];
+    this.trails = new Map(); // die → Trail
     this.hand = null;
+    this.ascent = null; // a nat 20 floating up to show itself off
+    this.hype = null; // slow-mo push-in on the deciding d20
+    this.hypeUsed = false; // at most once per roll
+    this.timeScale = 1;
+    this.camAmt = 0; // 0 = normal view, 1 = pushed in on camFocus
+    this.camFocus = new THREE.Vector3();
+    this.camSpread = 0;
+    this.simTime = 0;
+    this.skin = 'classic';
     this.dirty = true;
 
     const renderer = (this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }));
@@ -343,11 +643,17 @@ export class DiceTray {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     el.appendChild(renderer.domElement);
+    if (!envMap) {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      pmrem.dispose();
+    }
 
     const scene = (this.scene = new THREE.Scene());
     this.camera = new THREE.PerspectiveCamera(36, 1, 0.1, 200);
+    this.camBase = new THREE.Vector3(0, 22, 6);
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x302040, 1.4));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x302040, 1.2));
     const key = (this.key = new THREE.DirectionalLight(0xffffff, 2.6));
     key.position.set(-8, 24, 10);
     key.castShadow = true;
@@ -360,10 +666,18 @@ export class DiceTray {
     const rim = new THREE.DirectionalLight(0xffc2a0, 0.8);
     rim.position.set(10, 8, -12);
     scene.add(rim);
+    // Two candles just off the far corners of the table (placed in resize()).
+    this.candles = [0, 1].map(() => {
+      const l = new THREE.PointLight(0xff8a3a, 0, 0, 1.4);
+      l.userData = { base: 0, f: 1 };
+      scene.add(l);
+      return l;
+    });
+    this.flickT = 0;
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(400, 400).rotateX(-Math.PI / 2),
-      new THREE.ShadowMaterial({ opacity: 0.5 })
+      new THREE.MeshStandardMaterial({ map: woodTexture(renderer), roughness: 0.82, metalness: 0 })
     );
     floor.receiveShadow = true;
     scene.add(floor);
@@ -398,6 +712,9 @@ export class DiceTray {
       requestAnimationFrame(loop);
       const dt = Math.min(0.05, (t - (last ?? t)) / 1000);
       last = t;
+      this.updateHype(dt);
+      const sdt = dt * this.timeScale; // simulation time: slows down during the hype cam
+      this.simTime += sdt;
       if (this.hand) {
         this.updateHand(dt, t / 1000);
         this.dirty = true;
@@ -419,17 +736,21 @@ export class DiceTray {
         g.light.intensity = g.base * (0.85 + 0.15 * pulse);
         this.dirty = true;
       }
+      this.updateCandles(dt);
       this.updateHolder(dt);
       if (this.dice.length) {
-        world.step(1 / 120, dt, 12);
+        // Shrink the step with the time scale so slow motion stays smooth instead of stuttering.
+        world.step((1 / 120) * this.timeScale, sdt, 12);
         for (const d of this.dice) {
-          if (!d.inWorld || d.state === 'staged') continue; // posed by the hand / the holder
+          if (!d.inWorld || d.state === 'staged' || d.posed) continue; // posed by the hand / holder / ascension
           d.mesh.position.copy(d.body.position);
           d.mesh.quaternion.copy(d.body.quaternion);
           if (d.body.type === CANNON.Body.DYNAMIC && d.body.sleepState !== CANNON.Body.SLEEPING) this.dirty = true;
         }
-        this.throws = this.throws.filter((th) => !this.checkThrow(th, dt));
+        this.throws = this.throws.filter((th) => !this.checkThrow(th, sdt));
       }
+      if (this.ascent) this.updateAscent(dt);
+      this.updateTrails();
       if (this.dirty) {
         renderer.render(scene, this.camera);
         this.dirty = false;
@@ -446,7 +767,8 @@ export class DiceTray {
     cam.aspect = w / h;
     const t = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
     const dist = Math.max(22, 8 / (t * Math.min(1, cam.aspect)));
-    cam.position.set(0, dist, dist * 0.28);
+    this.camBase.set(0, dist, dist * 0.28);
+    cam.position.copy(this.camBase);
     cam.lookAt(0, 0, 0);
     cam.updateProjectionMatrix();
     cam.updateMatrixWorld();
@@ -472,8 +794,109 @@ export class DiceTray {
     const ext = Math.max(xHalf, -zMin, zMax) + 4;
     sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext;
     sc.updateProjectionMatrix();
+
+    const [c1, c2] = this.candles;
+    c1.position.set(-xHalf - 2, 5, zMin + 2);
+    c2.position.set(xHalf + 2, 5, zMin * 0.1);
+    for (const c of this.candles) c.userData.base = 4.5 * ext;
+
     this.layoutHolder();
+    this.applyCamera();
     this.dirty = true;
+  }
+
+  /** Flicker the candles ~15 times a second (cheap, and doesn't force a render every frame). */
+  updateCandles(dt) {
+    this.flickT += dt;
+    if (this.flickT < 0.066) return;
+    this.flickT = 0;
+    for (const c of this.candles) {
+      const u = c.userData;
+      u.f = u.f * 0.55 + rand(0.82, 1.12) * 0.45;
+      c.intensity = u.base * u.f;
+    }
+    this.dirty = true;
+  }
+
+  /* ----- Hype cam: when the deciding d20 is slowing down with a 20 or a 1 showing, slow time and push in ----- */
+
+  updateHype(dt) {
+    if (!this.hype && !this.hypeUsed) this.checkHype();
+    const h = this.hype;
+    if (h) {
+      h.t += dt;
+      if (!h.doneAt && h.dice.every((d) => d.state === 'done')) h.doneAt = h.t;
+      const interrupted = this.dice.some((d) => d.state !== 'done' && !h.dice.includes(d));
+      const lingered = h.doneAt && !this.ascent && h.t - h.doneAt > 0.7;
+      if (interrupted || lingered || h.t > 7) this.endHype();
+      else {
+        const goal = new THREE.Vector3();
+        h.dice.forEach((d) => goal.add(d.mesh.position));
+        goal.divideScalar(h.dice.length);
+        this.camFocus.lerp(goal, 1 - Math.exp(-dt * 6));
+        // Keep a spread-out pair both in shot.
+        const spread = h.dice.length > 1 ? h.dice[0].mesh.position.distanceTo(h.dice[1].mesh.position) : 0;
+        this.camSpread += (spread - this.camSpread) * (1 - Math.exp(-dt * 6));
+      }
+    }
+    // Slow motion is brief: it eases back to full speed after ~2s even if the die is still going.
+    const slow = this.hype && !this.hype.doneAt && this.hype.t < 2;
+    const ts = slow ? SLOW_MO : 1;
+    this.timeScale += (ts - this.timeScale) * (1 - Math.exp(-dt * (slow ? 12 : 5)));
+    if (Math.abs(ts - this.timeScale) < 0.002) this.timeScale = ts;
+
+    const want = this.hype ? 1 : 0;
+    if (this.camAmt !== want || this.hype) {
+      this.camAmt += (want - this.camAmt) * (1 - Math.exp(-dt * (want ? 3.5 : 3.2)));
+      if (Math.abs(want - this.camAmt) < 0.004) this.camAmt = want; // imperceptible after smoothstep
+      this.applyCamera();
+      this.dirty = true;
+    }
+  }
+
+  checkHype() {
+    const live = this.dice.filter((d) => d.state !== 'done');
+    if (!live.length || live.length > 2) return;
+    if (live.some((d) => d.state !== 'rolling' || d.def.sides !== 20 || d.rollT < 0.3)) return;
+    if (live.some((d) => d.body.velocity.length() > 8 || d.body.angularVelocity.length() > 14 || d.body.position.y > 2.4)) return;
+    if (live.length === 2 && live[0].body.position.distanceTo(live[1].body.position) > 7) return; // too far apart to frame
+    const teasing = live.some((d) => {
+      const r = readDie(d);
+      return r.top > 0.9 && (r.value === 20 || r.value === 1);
+    });
+    if (!teasing) return;
+    this.hypeUsed = true;
+    this.hype = { dice: live, t: 0, doneAt: 0 };
+    this.camFocus.copy(live[0].mesh.position);
+    this.camSpread = 0;
+    this.hooks.onHype?.(true);
+  }
+
+  endHype() {
+    if (!this.hype) return;
+    this.hype = null;
+    this.hooks.onHype?.(false);
+  }
+
+  /** Blend the camera between its normal view and a close-up on camFocus. */
+  applyCamera() {
+    const cam = this.camera;
+    const a = smooth(this.camAmt);
+    const base = this.camBase;
+    if (a < 1e-4) {
+      cam.position.copy(base);
+      cam.lookAt(0, 0, 0);
+    } else {
+      // Push in to 40% of the normal distance, or less far if that would crop a spread-out pair
+      // (0.8: the letterbox bars cover the top and bottom of the view).
+      const halfView = 0.8 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) * Math.min(1, cam.aspect) * base.length();
+      const frac = THREE.MathUtils.clamp((this.camSpread / 2 + 2) / halfView, 0.4, 1);
+      const close = this.camFocus.clone().addScaledVector(base.clone().normalize(), base.length() * frac);
+      cam.position.lerpVectors(base, close, a);
+      cam.lookAt(new THREE.Vector3().lerpVectors(new THREE.Vector3(), this.camFocus, a));
+      cam.rotateZ(-0.06 * a); // a slight dutch tilt
+    }
+    cam.updateMatrixWorld();
   }
 
   /* ----- The dice holder: a little tray at the bottom of the table where added dice wait ----- */
@@ -560,6 +983,13 @@ export class DiceTray {
     this.dirty = true;
   }
 
+  inHolder(d) {
+    const h = this.holder;
+    if (!h.body) return false;
+    const p = d.body.position;
+    return Math.abs(p.x) < h.tw / 2 && Math.abs(p.z - h.tz) < h.td / 2;
+  }
+
   updateHolder(dt) {
     const h = this.holder;
     const k = 1 - Math.exp(-dt * 9);
@@ -615,17 +1045,38 @@ export class DiceTray {
     b.wakeUp();
   }
 
+  /* ----- Dice finishes ----- */
+
+  kindFor(spec) {
+    return getKind(spec.sides, spec.tens ? 'tens' : 'normal', this.skin);
+  }
+
+  /** Switch the dice finish; re-skins every die already on the table (except highlighted ones). */
+  setSkin(name) {
+    this.skin = SKINS[name] ? name : 'classic';
+    for (const d of this.dice) {
+      d.kind = this.kindFor(d.spec);
+      if (!d.ownMat) d.mesh.material = d.kind.material;
+      d.mesh.children[0].material = d.kind.edgeMat;
+    }
+    this.dirty = true;
+  }
+
   /* ----- Dice lifecycle: stage() puts a die on the table, then it is grabbed/tossed, then read ----- */
 
   clear() {
     for (const d of this.dice) this.discard(d);
     for (const g of this.glows) this.scene.remove(g.light);
     for (const f of this.fx) { this.scene.remove(f.obj); f.dispose(); }
+    if (this.ascent) this.endAscent();
     this.dice = [];
     this.throws = [];
     this.glows = [];
     this.fx = [];
     this.hand = null;
+    this.ascent = null;
+    this.endHype();
+    this.hypeUsed = false;
     // Hide the holder instantly so the next roll's holder slides in fresh.
     this.layoutHolder();
     this.holder.slide = 1;
@@ -636,6 +1087,12 @@ export class DiceTray {
     this.scene.remove(d.mesh);
     this.removeBody(d);
     if (d.ownMat) d.mesh.material.dispose();
+    const tr = this.trails.get(d);
+    if (tr) {
+      this.scene.remove(tr.obj);
+      tr.dispose();
+      this.trails.delete(d);
+    }
   }
 
   addBody(d) {
@@ -651,7 +1108,7 @@ export class DiceTray {
   }
 
   makeDie(spec) {
-    const kind = getKind(spec.sides, spec.tens ? 'tens' : 'normal');
+    const kind = this.kindFor(spec);
     const mesh = new THREE.Mesh(kind.geometry, kind.material);
     mesh.castShadow = true;
     mesh.add(new THREE.LineSegments(kind.edges, kind.edgeMat));
@@ -723,6 +1180,25 @@ export class DiceTray {
     this.scene.add(f.obj);
   }
 
+  updateTrails() {
+    for (const d of this.dice) {
+      if (d.state !== 'rolling' || this.trails.has(d)) continue;
+      const tr = new Trail(SKINS[this.skin].trail, SIZE[d.def.sides] * 1.05);
+      this.trails.set(d, tr);
+      this.scene.add(tr.obj);
+    }
+    for (const [d, tr] of this.trails) {
+      const emitting = d.state === 'rolling' && d.body.velocity.length() > 6;
+      if (tr.update(this.simTime, d.mesh.position, emitting, this.camera.position)) this.dirty = true;
+      else if (d.state !== 'rolling') {
+        this.scene.remove(tr.obj);
+        tr.dispose();
+        this.trails.delete(d);
+        this.dirty = true;
+      }
+    }
+  }
+
   rayAt(cx, cy) {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
@@ -738,7 +1214,7 @@ export class DiceTray {
     return hit ? staged.find((d) => d.mesh === hit.object) : null;
   }
 
-  /** Scoop staged dice off the table and toss them into the middle (the Roll button). → Promise<number[]> */
+  /** Scoop staged dice off the table and toss them into the middle (the Roll button). */
   toss(dice) {
     const { xHalf, zMin, zMax } = this.bounds;
     const zc = (zMin + zMax) / 2 - 1;
@@ -755,13 +1231,12 @@ export class DiceTray {
     }
     this.layoutHolder();
     this.hooks.onThrow?.(0.7);
-    return this.startThrow(dice);
+    this.startThrow(dice);
   }
 
   startThrow(dice) {
-    return new Promise((resolve) => {
-      this.throws.push({ dice, resolve, elapsed: 0, still: 0, nudges: 0 });
-    });
+    for (const d of dice) Object.assign(d, { rollT: 0, still: 0, nudges: 0 });
+    this.throws.push({ dice, elapsed: 0 });
   }
 
   /* ----- Throwing by hand: grab() on pointer down, moveHand() while dragging, release() to throw ----- */
@@ -785,13 +1260,14 @@ export class DiceTray {
       d.spinAxis = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize();
       d.spin = rand(3, 7);
     }
-    this.hand = { dice, target, pos: target.clone(), samples: [{ t: performance.now(), p: target.clone() }] };
+    this.hand = { dice, target, cx, cy, pos: target.clone(), samples: [{ t: performance.now(), p: target.clone() }] };
     this.layoutHolder(); // an emptied holder slides away
   }
 
   moveHand(cx, cy) {
     if (!this.hand) return;
     const now = performance.now();
+    Object.assign(this.hand, { cx, cy });
     this.hand.target = this.pointerToHand(cx, cy);
     this.hand.samples.push({ t: now, p: this.hand.target.clone() });
     this.hand.samples = this.hand.samples.filter((s) => now - s.t < 150);
@@ -799,6 +1275,7 @@ export class DiceTray {
 
   updateHand(dt, time) {
     const h = this.hand;
+    if (this.camAmt > 0) h.target = this.pointerToHand(h.cx, h.cy); // the camera is still easing back
     h.pos.lerp(h.target, 1 - Math.exp(-dt * 30));
     const q = new THREE.Quaternion();
     const goal = new THREE.Vector3();
@@ -810,10 +1287,10 @@ export class DiceTray {
     });
   }
 
-  /** Throw the held dice with the pointer's recent velocity. → Promise<number[]> */
+  /** Throw the held dice with the pointer's recent velocity. */
   release() {
     const h = this.hand;
-    if (!h) return Promise.resolve([]);
+    if (!h) return;
     this.hand = null;
     const now = performance.now();
     const recent = h.samples.filter((s) => now - s.t < 100);
@@ -839,43 +1316,48 @@ export class DiceTray {
       this.addBody(d);
     }
     this.hooks.onThrow?.(flung ? Math.min(1, speed / 35) : 0.2);
-    return this.startThrow(h.dice);
+    this.startThrow(h.dice);
   }
 
-  /** Returns true once the throw has settled and its dice have been read. */
+  /**
+   * Read each die as soon as it has come to rest flat on the table, and freeze it there.
+   * Returns true once every die in the throw has been read.
+   */
   checkThrow(th, dt) {
     th.elapsed += dt;
-    const moving = th.dice.some((d) => d.body.velocity.length() > 0.12 || d.body.angularVelocity.length() > 0.25);
-    th.still = moving ? 0 : th.still + dt;
     const timeout = th.elapsed > 9;
-    if (!(timeout || (th.still > 0.3 && th.elapsed > 0.6))) return false;
-
-    const reads = th.dice.map(readDie);
-    const cocked = th.dice.filter((d, i) => !reads[i].flat);
-    if (cocked.length && !timeout && th.nudges < 4) {
-      // A die is leaning on another or a wall: give it a little hop.
-      th.nudges++;
-      th.still = 0;
-      for (const d of cocked) {
-        d.body.wakeUp();
-        d.body.velocity.set(rand(-2, 2), rand(5, 8), rand(-2, 2));
-        d.body.angularVelocity.set(rand(-8, 8), rand(-8, 8), rand(-8, 8));
-      }
-      return false;
-    }
-    th.dice.forEach((d, i) => {
-      d.value = reads[i].value;
-      d.state = 'done';
-      // Freeze rolled dice so later throws can't knock them onto a different face.
+    for (const d of th.dice) {
+      if (d.state !== 'rolling') continue;
+      d.rollT += dt;
       const b = d.body;
-      b.type = CANNON.Body.STATIC;
-      b.mass = 0;
-      b.updateMassProperties();
-      b.velocity.setZero();
-      b.angularVelocity.setZero();
-    });
-    th.resolve(reads.map((r) => r.value));
-    return true;
+      const moving = b.velocity.length() > 0.12 || b.angularVelocity.length() > 0.25;
+      d.still = moving ? 0 : d.still + dt;
+      if (!timeout && !(d.still > 0.3 && d.rollT > 0.6)) continue;
+      const r = readDie(d);
+      const propped = r.bottom > (this.inHolder(d) ? 0.6 : 0.15); // resting on another die
+      if ((!r.flat || propped) && !timeout && d.nudges < 4) {
+        // Leaning on another die or a wall: give it a little hop.
+        d.nudges++;
+        d.still = 0;
+        b.wakeUp();
+        b.velocity.set(rand(-2, 2), rand(5, 8), rand(-2, 2));
+        b.angularVelocity.set(rand(-8, 8), rand(-8, 8), rand(-8, 8));
+        continue;
+      }
+      this.settle(d, r.value);
+    }
+    return th.dice.every((d) => d.state !== 'rolling');
+  }
+
+  settle(d, value) {
+    d.value = value;
+    d.state = 'done';
+    // Freeze it so later dice can't knock it onto a different face.
+    this.setStatic(d);
+    d.mesh.position.copy(d.body.position);
+    d.mesh.quaternion.copy(d.body.quaternion);
+    this.dirty = true;
+    this.hooks.onSettle?.(d);
   }
 
   /** Highlight a settled die: 'dropped' (advantage loser), 'crit', or 'fumble'. */
@@ -895,10 +1377,12 @@ export class DiceTray {
       const light = new THREE.PointLight(0xffc040, 16, 14, 2);
       light.position.set(at.x, at.y + 3, at.z);
       this.scene.add(light);
-      this.glows.push({ mat, light, t: 0, base: 16 });
-      this.addFx(new Burst(at, { count: 180, color: 0xffc83d, speed: 20, up: 0.75, life: 1.7, size: 0.42, gravity: -24 }));
+      d.glow = { mat, light, t: 0, base: 16 };
+      this.glows.push(d.glow);
+      this.addFx(new Embers(at));
       this.addFx(new Burst(at, { count: 70, color: 0xffffff, speed: 11, up: 0.6, life: 1.1, size: 0.3, gravity: -18 }));
       this.addFx(new Shockwave(at, 0xffc83d, 0.9));
+      if (!this.ascent && d.def.sides === 20) this.startAscent(d);
     } else if (state === 'fumble') {
       mat.color.setRGB(0.4, 0.3, 0.3);
       mat.emissive = new THREE.Color(0x550000);
@@ -906,5 +1390,79 @@ export class DiceTray {
       this.addFx(new Shockwave(at, 0xff2a2a, 0.7));
     }
     this.dirty = true;
+  }
+
+  /* ----- Nat-20 ascension: the die floats up over a magic circle, turns its 20 to the camera, and settles back ----- */
+
+  startAscent(d) {
+    const sigil = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({
+        map: getSigilTex(), color: 0xffc23d, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      })
+    );
+    sigil.position.set(d.mesh.position.x, 0.07, d.mesh.position.z);
+    sigil.scale.setScalar(0.001);
+    this.scene.add(sigil);
+    d.posed = true;
+    this.ascent = {
+      d,
+      t: 0,
+      face: d.def.faces.find((f) => f.value === 20),
+      fromPos: d.mesh.position.clone(),
+      fromQuat: d.mesh.quaternion.clone(),
+      sigil,
+    };
+  }
+
+  /** Orientation that shows `face` to the camera, upright on screen. */
+  faceToCamera(face, at) {
+    const n = new THREE.Vector3().subVectors(this.camera.position, at).normalize();
+    const camUp = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
+    const u = camUp.addScaledVector(n, -camUp.dot(n)).normalize();
+    const r = u.clone().cross(n);
+    const world = new THREE.Matrix4().makeBasis(r, u, n);
+    const local = new THREE.Matrix4().makeBasis(face.right, face.up, face.normal);
+    return new THREE.Quaternion().setFromRotationMatrix(world.multiply(local.transpose()));
+  }
+
+  updateAscent(dt) {
+    const a = this.ascent;
+    a.t += dt;
+    const { d, t, sigil } = a;
+    const end = RISE + HOVER + FALL;
+    const k = t < RISE ? smooth(t / RISE) : t < RISE + HOVER ? 1 : 1 - smooth(clamp01((t - RISE - HOVER) / FALL));
+    const hover = a.fromPos.clone();
+    hover.y = 5 + Math.sin(t * 3) * 0.15;
+    d.mesh.position.lerpVectors(a.fromPos, hover, k);
+    const show = this.faceToCamera(a.face, d.mesh.position);
+    show.premultiply(new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3().subVectors(this.camera.position, d.mesh.position).normalize(),
+      Math.sin(t * 2.4) * 0.12
+    ));
+    d.mesh.quaternion.slerpQuaternions(a.fromQuat, show, k);
+    d.mesh.scale.setScalar(1 + 0.3 * k);
+    d.glow?.light.position.set(d.mesh.position.x, d.mesh.position.y + 2.5, d.mesh.position.z);
+
+    const grow = clamp01(t / 0.45);
+    const s = 5 * (1 + 2.2 * (grow - 1) ** 3 + 1.2 * (grow - 1) ** 2); // ease out with a little overshoot
+    sigil.scale.setScalar(Math.max(0.001, s));
+    sigil.rotation.y += dt * 0.9;
+    sigil.material.opacity = t < end - 0.5 ? 0.9 : 0.9 * clamp01((end - t) / 0.5);
+    this.dirty = true;
+
+    if (t >= end) this.endAscent();
+  }
+
+  endAscent() {
+    const { d, sigil, fromPos, fromQuat } = this.ascent;
+    d.mesh.position.copy(fromPos);
+    d.mesh.quaternion.copy(fromQuat);
+    d.mesh.scale.setScalar(1);
+    d.posed = false;
+    this.scene.remove(sigil);
+    sigil.geometry.dispose();
+    sigil.material.dispose();
+    this.ascent = null;
   }
 }

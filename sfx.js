@@ -1,5 +1,6 @@
 // Synthesized sound effects (Web Audio), so there are no audio files to load.
 const KEY = 'the-table-sound';
+const VOLUME = 0.9;
 let ctx, master, noise;
 let enabled = localStorage.getItem(KEY) !== 'off';
 let lastClack = 0;
@@ -11,7 +12,7 @@ function ac() {
     ctx = new AudioContext();
     const comp = ctx.createDynamicsCompressor();
     master = ctx.createGain();
-    master.gain.value = 0.9;
+    master.gain.value = enabled ? VOLUME : 0;
     master.connect(comp).connect(ctx.destination);
     noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
     const d = noise.getChannelData(0);
@@ -63,6 +64,8 @@ export const sfx = {
   set enabled(v) {
     enabled = v;
     localStorage.setItem(KEY, v ? 'on' : 'off');
+    // Fade the master out too, so muting also cuts sounds that are already playing.
+    if (master) master.gain.setTargetAtTime(v ? VOLUME : 0, ctx.currentTime, 0.015);
   },
   /** Must be called from a user gesture before anything can play. */
   unlock() { if (enabled) ac(); },
@@ -111,6 +114,15 @@ export const sfx = {
     tone({ t: 0.6, freq: 277, to: 185, dur: 0.8, type: 'sawtooth', gain: 0.12 });
     tone({ freq: 70, to: 35, dur: 0.5, gain: 0.5 });
     hiss({ freq: 500, q: 0.8, dur: 0.15, gain: 0.35 });
+  },
+
+  /** Time slows down: a falling boom, a muffled swell, and two heartbeats. */
+  slowmo() {
+    if (!on()) return;
+    tone({ freq: 130, to: 38, dur: 1.3, gain: 0.5 });
+    tone({ freq: 260, to: 55, dur: 1.1, type: 'sawtooth', gain: 0.05 });
+    hiss({ freq: 2600, to: 150, q: 0.7, type: 'lowpass', dur: 1.1, gain: 0.25, attack: 0.04 });
+    [0.6, 0.85].forEach((t) => tone({ t, freq: 64, to: 38, dur: 0.2, gain: 0.6 }));
   },
 
   hit(k = 1) {

@@ -330,11 +330,12 @@ export class DiceTray {
   constructor(el, hooks = {}) {
     this.el = el;
     this.hooks = hooks;
-    this.dice = [];
+    this.dice = []; // every die on the table: state 'staged' | 'held' | 'rolling' | 'done'
+    this.throws = []; // in-flight throws waiting to settle
     this.fx = [];
     this.glows = [];
     this.hand = null;
-    this.rolling = false;
+    this.slot = 0; // next free spot in the staging row
     this.dirty = true;
 
     const renderer = (this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }));
@@ -415,14 +416,15 @@ export class DiceTray {
         g.light.intensity = g.base * (0.85 + 0.15 * pulse);
         this.dirty = true;
       }
-      if (this.rolling) {
+      if (this.dice.length) {
         world.step(1 / 120, dt, 12);
         for (const d of this.dice) {
+          if (!d.inWorld) continue; // held dice are posed by the hand
           d.mesh.position.copy(d.body.position);
           d.mesh.quaternion.copy(d.body.quaternion);
+          if (d.body.type === CANNON.Body.DYNAMIC && d.body.sleepState !== CANNON.Body.SLEEPING) this.dirty = true;
         }
-        this.check(dt);
-        this.dirty = true;
+        this.throws = this.throws.filter((th) => !this.checkThrow(th, dt));
       }
       if (this.dirty) {
         renderer.render(scene, this.camera);
@@ -469,20 +471,37 @@ export class DiceTray {
     this.dirty = true;
   }
 
+  /* ----- Dice lifecycle: stage() puts a die on the table, then it is grabbed/tossed, then read ----- */
+
   clear() {
-    const held = this.hand ? this.hand.dice : [];
-    for (const d of [...this.dice, ...held]) {
-      this.scene.remove(d.mesh);
-      this.world.removeBody(d.body);
-      if (d.ownMat) d.mesh.material.dispose();
-    }
+    for (const d of this.dice) this.discard(d);
     for (const g of this.glows) this.scene.remove(g.light);
     for (const f of this.fx) { this.scene.remove(f.obj); f.dispose(); }
     this.dice = [];
+    this.throws = [];
     this.glows = [];
     this.fx = [];
     this.hand = null;
+    this.slot = 0;
     this.dirty = true;
+  }
+
+  discard(d) {
+    this.scene.remove(d.mesh);
+    this.removeBody(d);
+    if (d.ownMat) d.mesh.material.dispose();
+  }
+
+  addBody(d) {
+    if (d.inWorld) return;
+    this.world.addBody(d.body);
+    d.inWorld = true;
+  }
+
+  removeBody(d) {
+    if (!d.inWorld) return;
+    this.world.removeBody(d.body);
+    d.inWorld = false;
   }
 
   makeDie(spec) {
@@ -504,9 +523,39 @@ export class DiceTray {
       sleepTimeLimit: 0.2,
     });
     body.isDie = true;
-    const die = { def, kind, mesh, body, lastHit: 0 };
+    const die = { spec, def, kind, mesh, body, state: 'new', inWorld: false, value: null, lastHit: 0 };
     body.addEventListener('collide', (e) => this.onCollide(die, e));
     return die;
+  }
+
+  /** Drop a new die onto the table's staging row. Returns the die handle. */
+  stage(spec) {
+    const d = this.makeDie(spec);
+    const { xHalf, zMax } = this.bounds;
+    const gap = 2.7;
+    const perRow = Math.max(1, Math.floor((2 * xHalf - 2) / gap));
+    const i = this.slot++;
+    d.body.position.set(
+      -xHalf + 1.9 + (i % perRow) * gap + rand(-0.2, 0.2),
+      2.2,
+      zMax - 1.9 - Math.floor(i / perRow) * gap + rand(-0.2, 0.2)
+    );
+    d.body.quaternion.setFromEuler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28));
+    d.body.angularVelocity.set(rand(-6, 6), rand(-6, 6), rand(-6, 6));
+    d.state = 'staged';
+    this.addBody(d);
+    d.mesh.position.copy(d.body.position);
+    d.mesh.quaternion.copy(d.body.quaternion);
+    this.scene.add(d.mesh);
+    this.dice.push(d);
+    this.dirty = true;
+    return d;
+  }
+
+  remove(d) {
+    this.discard(d);
+    this.dice = this.dice.filter((x) => x !== d);
+    this.dirty = true;
   }
 
   onCollide(die, e) {
@@ -518,7 +567,7 @@ export class DiceTray {
     die.lastHit = now;
     const kind = other.isDie ? 'dice' : other === this.floorBody ? 'floor' : 'wall';
     this.hooks.onImpact?.(v, kind);
-    if (v > (kind === 'dice' ? 9 : 14)) {
+    if (v > (kind === 'dice' ? 9 : 18)) {
       const c = e.contact;
       const p = c.bi.position.vadd(c.ri);
       this.addFx(new Burst(p, { count: Math.round(6 + v * 0.4), speed: 3 + v * 0.25, life: 0.35 }));
@@ -530,56 +579,50 @@ export class DiceTray {
     this.scene.add(f.obj);
   }
 
-  start(dice) {
-    this.dice = dice;
-    this.elapsed = 0;
-    this.still = 0;
-    this.nudges = 0;
-    this.rolling = true;
-    return new Promise((res) => (this.resolve = res));
+  rayAt(cx, cy) {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, this.camera);
+    return ray;
   }
 
-  /** Auto-throw from a random side. specs: [{ sides, tens? }] → Promise<number[]> (d10 gives 1-10) */
-  roll(specs) {
-    this.clear();
-    const { xHalf, zMin, zMax } = this.bounds;
-    const dir = Math.random() < 0.5 ? 1 : -1;
-    const gap = 2.8;
-    const perCol = Math.max(1, Math.floor((zMax - zMin - 2) / gap));
-    const maxCols = Math.max(1, Math.floor((2 * xHalf - 3) / gap));
-    const zc = (zMin + zMax) / 2;
+  /** The staged (not yet rolled) die under the pointer, or null. */
+  pick(cx, cy) {
+    const staged = this.dice.filter((d) => d.state === 'staged');
+    const hit = this.rayAt(cx, cy).intersectObjects(staged.map((d) => d.mesh), false)[0];
+    return hit ? staged.find((d) => d.mesh === hit.object) : null;
+  }
 
-    const dice = specs.map((s, i) => {
-      const die = this.makeDie(s);
-      const { body, mesh } = die;
-      const col = Math.floor(i / perCol), row = i % perCol;
-      const inCol = Math.min(specs.length - col * perCol, perCol);
-      body.position.set(
-        -dir * (xHalf - 1.5 - (col % maxCols) * gap),
-        rand(2, 4) + Math.floor(col / maxCols) * gap,
-        zc + (row - (inCol - 1) / 2) * gap + rand(-0.3, 0.3)
-      );
-      body.quaternion.setFromEuler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28));
-      body.velocity.set(dir * rand(18, 30), rand(2, 6), rand(-7, 7));
-      body.angularVelocity.set(rand(-25, 25), rand(-25, 25), rand(-25, 25));
-      this.world.addBody(body);
-      mesh.position.copy(body.position);
-      mesh.quaternion.copy(body.quaternion);
-      this.scene.add(mesh);
-      return die;
+  /** Scoop staged dice off the table and toss them into the middle (the Roll button). → Promise<number[]> */
+  toss(dice) {
+    const { xHalf, zMin, zMax } = this.bounds;
+    const zc = (zMin + zMax) / 2 - 1;
+    for (const d of dice) {
+      const b = d.body;
+      d.state = 'rolling';
+      this.addBody(d);
+      b.wakeUp();
+      const dir = new CANNON.Vec3(rand(-xHalf * 0.5, xHalf * 0.5) - b.position.x, 0, zc + rand(-2, 2) - b.position.z);
+      const speed = THREE.MathUtils.clamp(dir.length() * 2.2 + rand(3, 8), 6, 34);
+      dir.normalize();
+      b.velocity.set(dir.x * speed, rand(12, 17), dir.z * speed);
+      b.angularVelocity.set(rand(-25, 25), rand(-25, 25), rand(-25, 25));
+    }
+    this.hooks.onThrow?.(0.7);
+    return this.startThrow(dice);
+  }
+
+  startThrow(dice) {
+    return new Promise((resolve) => {
+      this.throws.push({ dice, resolve, elapsed: 0, still: 0, nudges: 0 });
     });
-    this.hooks.onThrow?.(0.8);
-    return this.start(dice);
   }
 
   /* ----- Throwing by hand: grab() on pointer down, moveHand() while dragging, release() to throw ----- */
 
   pointerToHand(cx, cy) {
-    const r = this.renderer.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(ndc, this.camera);
-    const p = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -HAND_Y), new THREE.Vector3());
+    const p = this.rayAt(cx, cy).ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -HAND_Y), new THREE.Vector3());
     if (!p) return this.hand?.target ?? new THREE.Vector3(0, HAND_Y, 0);
     const { xHalf, zMin, zMax } = this.bounds;
     const m = HAND_GAP + 0.4;
@@ -588,19 +631,17 @@ export class DiceTray {
     return p;
   }
 
-  grab(specs, cx, cy) {
-    this.clear();
+  /** Pick staged dice up off the table into the "hand" under the pointer. */
+  grab(dice, cx, cy) {
     const target = this.pointerToHand(cx, cy);
-    const dice = specs.map((s) => {
-      const die = this.makeDie(s);
-      die.mesh.quaternion.setFromEuler(new THREE.Euler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28)));
-      die.spinAxis = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize();
-      die.spin = rand(3, 7);
-      this.scene.add(die.mesh);
-      return die;
-    });
+    for (const d of dice) {
+      this.removeBody(d);
+      d.state = 'held';
+      d.spinAxis = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize();
+      d.spin = rand(3, 7);
+    }
     this.hand = { dice, target, pos: target.clone(), samples: [{ t: performance.now(), p: target.clone() }] };
-    this.updateHand(0, performance.now() / 1000);
+    this.dirty = true;
   }
 
   moveHand(cx, cy) {
@@ -615,9 +656,11 @@ export class DiceTray {
     const h = this.hand;
     h.pos.lerp(h.target, 1 - Math.exp(-dt * 30));
     const q = new THREE.Quaternion();
+    const goal = new THREE.Vector3();
     h.dice.forEach((d, i) => {
-      d.mesh.position.copy(h.pos).add(handOffset(i));
-      d.mesh.position.y += Math.sin(time * 18 + i * 1.7) * 0.12; // rattle in the hand
+      goal.copy(h.pos).add(handOffset(i));
+      goal.y += Math.sin(time * 18 + i * 1.7) * 0.12; // rattle in the hand
+      d.mesh.position.lerp(goal, 1 - Math.exp(-dt * 22)); // glide up from the table
       d.mesh.quaternion.premultiply(q.setFromAxisAngle(d.spinAxis, d.spin * dt));
     });
   }
@@ -645,18 +688,55 @@ export class DiceTray {
       body.position.copy(mesh.position);
       body.quaternion.copy(mesh.quaternion);
       if (flung) body.velocity.set(vel.x * rand(0.9, 1.1), rand(-2, 2), vel.z * rand(0.9, 1.1));
-      else body.velocity.set(rand(-4, 4), 0, rand(-4, 4)); // just a click: let them drop
+      else body.velocity.set(rand(-4, 4), 0, rand(-4, 4)); // just a click: let it drop
       const s = 10 + speed * 0.8;
       body.angularVelocity.set(rand(-s, s), rand(-s, s), rand(-s, s));
-      this.world.addBody(body);
+      d.state = 'rolling';
+      this.addBody(d);
+      body.wakeUp();
     }
     this.hooks.onThrow?.(flung ? Math.min(1, speed / 35) : 0.2);
-    return this.start(h.dice);
+    return this.startThrow(h.dice);
+  }
+
+  /** Returns true once the throw has settled and its dice have been read. */
+  checkThrow(th, dt) {
+    th.elapsed += dt;
+    const moving = th.dice.some((d) => d.body.velocity.length() > 0.12 || d.body.angularVelocity.length() > 0.25);
+    th.still = moving ? 0 : th.still + dt;
+    const timeout = th.elapsed > 9;
+    if (!(timeout || (th.still > 0.3 && th.elapsed > 0.6))) return false;
+
+    const reads = th.dice.map(readDie);
+    const cocked = th.dice.filter((d, i) => !reads[i].flat);
+    if (cocked.length && !timeout && th.nudges < 4) {
+      // A die is leaning on another or a wall: give it a little hop.
+      th.nudges++;
+      th.still = 0;
+      for (const d of cocked) {
+        d.body.wakeUp();
+        d.body.velocity.set(rand(-2, 2), rand(5, 8), rand(-2, 2));
+        d.body.angularVelocity.set(rand(-8, 8), rand(-8, 8), rand(-8, 8));
+      }
+      return false;
+    }
+    th.dice.forEach((d, i) => {
+      d.value = reads[i].value;
+      d.state = 'done';
+      // Freeze rolled dice so later throws can't knock them onto a different face.
+      const b = d.body;
+      b.type = CANNON.Body.STATIC;
+      b.mass = 0;
+      b.updateMassProperties();
+      b.velocity.setZero();
+      b.angularVelocity.setZero();
+    });
+    th.resolve(reads.map((r) => r.value));
+    return true;
   }
 
   /** Highlight a settled die: 'dropped' (advantage loser), 'crit', or 'fumble'. */
-  mark(i, state) {
-    const d = this.dice[i];
+  mark(d, state) {
     if (!d) return;
     const mat = (d.mesh.material = d.kind.material.clone());
     d.ownMat = true;
@@ -683,31 +763,5 @@ export class DiceTray {
       this.addFx(new Shockwave(at, 0xff2a2a, 0.7));
     }
     this.dirty = true;
-  }
-
-  check(dt) {
-    this.elapsed += dt;
-    const moving = this.dice.some(
-      (d) => d.body.velocity.length() > 0.12 || d.body.angularVelocity.length() > 0.25
-    );
-    this.still = moving ? 0 : this.still + dt;
-    const timeout = this.elapsed > 9;
-    if (!(timeout || (this.still > 0.3 && this.elapsed > 0.6))) return;
-
-    const reads = this.dice.map(readDie);
-    const cocked = this.dice.filter((d, i) => !reads[i].flat);
-    if (cocked.length && !timeout && this.nudges < 4) {
-      // A die is leaning on another or a wall: give it a little hop.
-      this.nudges++;
-      this.still = 0;
-      for (const d of cocked) {
-        d.body.wakeUp();
-        d.body.velocity.set(rand(-2, 2), rand(5, 8), rand(-2, 2));
-        d.body.angularVelocity.set(rand(-8, 8), rand(-8, 8), rand(-8, 8));
-      }
-      return;
-    }
-    this.rolling = false;
-    this.resolve(reads.map((r) => r.value));
   }
 }

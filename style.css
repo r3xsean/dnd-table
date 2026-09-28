@@ -302,9 +302,9 @@ main {
     linear-gradient(#1a1420, #0e0c12);
 }
 .tray canvas { position: absolute; inset: 0; display: block; }
-.tray { cursor: grab; touch-action: none; user-select: none; }
+.tray { touch-action: none; user-select: none; }
+.tray.can-grab { cursor: grab; }
 body.holding .tray { cursor: grabbing; }
-body.rolling:not(.holding) .tray { cursor: progress; }
 .tray.shake { animation: tray-shake 0.45s; }
 @keyframes tray-shake {
   15% { transform: translate(-10px, 4px) rotate(-0.4deg); }
@@ -445,6 +445,10 @@ body.rolling:not(.holding) .tray { cursor: progress; }
 .result-break .part { white-space: nowrap; }
 .result-break em { font-style: normal; color: var(--muted); margin-right: 4px; }
 .result-break s { color: var(--muted); }
+.result-break .pending { font-style: normal; color: var(--yellow); opacity: 0.6; }
+.result-total.bump { animation: bump 0.3s ease-out; }
+@keyframes bump { 0% { transform: scale(1.18); } 100% { transform: scale(1); } }
+.result[data-tag='partial'] .result-tag { background: var(--yellow); }
 .result-break .dot { margin: 0 10px; color: var(--red); }
 .result[data-tag='crit'] .result-total { color: var(--green); animation: glow 1s ease-in-out infinite alternate; }
 .result[data-tag='crit'] .result-tag { background: var(--green); }
@@ -577,6 +581,7 @@ body.rolling:not(.holding) .tray { cursor: progress; }
 }
 .toggle + .toggle { border-left: none; }
 .toggle.on { background: var(--yellow); color: var(--line); }
+.toggle.locked { opacity: 0.45; cursor: not-allowed; }
 
 .roll-btn {
   font-family: var(--display);

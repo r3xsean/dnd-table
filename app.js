@@ -210,83 +210,143 @@ const fontsReady = document.fonts
   .catch(() => {})
   .then(() => (fontsLoaded = true));
 
-let pool = {};
 let adv = null;
-let rolling = false;
+// The current roll: dice groups sitting on / thrown across the table. A group is one die, or the two
+// dice that make one roll (d100 tens+ones, or a d20 with advantage). state: staged → held → rolling → done.
+let set = null;
+let lastBang = 0;
 const modEl = $('#mod');
 const buttonsEl = $('#dice-buttons');
+const resultEl = $('#result');
 
 for (const s of ORDER) {
   const b = document.createElement('button');
   b.className = 'die-btn';
   b.dataset.sides = s;
-  b.title = `d${s} — click to add, right-click to remove`;
+  b.title = `d${s} — click to put one on the table, right-click to take one back`;
   b.innerHTML = `<svg viewBox="0 0 48 48">${ICONS[s]}</svg><span>d${s}</span><b class="count"></b>`;
-  b.addEventListener('click', () => addDie(s, 1));
-  b.addEventListener('contextmenu', (e) => { e.preventDefault(); addDie(s, -1); });
+  b.addEventListener('click', () => addDie(s));
+  b.addEventListener('contextmenu', (e) => { e.preventDefault(); removeDie(s); });
   buttonsEl.appendChild(b);
 }
 
-const diceCount = (p) => Object.entries(p).reduce((n, [s, c]) => n + c * (s === '100' ? 2 : 1), 0);
+const getMod = () => parseInt(modEl.value, 10) || 0;
+const liveSet = () => (set && !set.done ? set : null);
+const started = (s) => s.groups.some((g) => g.state !== 'staged');
 
-function addDie(s, d) {
-  const next = Math.max(0, (pool[s] || 0) + d);
-  if (d > 0 && diceCount(pool) + (s === 100 ? 2 : 1) > MAX_DICE) return;
-  pool[s] = next;
-  if (!next) delete pool[s];
-  // Removing the last d20 from a mixed pool leaves nothing for ADV/DIS to act on.
-  if (s === 20 && !next && Object.keys(pool).length) adv = null;
+function newSet() {
+  tray.clear();
+  resultEl.classList.remove('show');
+  return (set = { groups: [], adv, done: false });
+}
+
+function specsFor(sides) {
+  if (sides === 100) return [{ sides: 10, tens: true }, { sides: 10 }];
+  if (sides === 20 && adv) return [{ sides: 20 }, { sides: 20 }];
+  return [{ sides }];
+}
+
+function addDie(sides) {
+  if (!fontsLoaded) return;
+  sfx.unlock();
+  const s = liveSet() ?? newSet();
+  const specs = specsFor(sides);
+  if (s.groups.reduce((n, g) => n + g.dice.length, 0) + specs.length > MAX_DICE) return;
+  const g = { sides, state: 'staged', dice: [] };
+  g.dice = specs.map((spec) => Object.assign(tray.stage(spec), { group: g }));
+  s.groups.push(g);
   renderPool();
 }
 
+function removeGroup(g) {
+  g.dice.forEach((d) => tray.remove(d));
+  set.groups = set.groups.filter((x) => x !== g);
+  if (!set.groups.length) {
+    set = null;
+    resultEl.classList.remove('show');
+  } else if (set.groups.every((x) => x.state === 'done')) finishSet();
+  renderPool();
+}
+
+function removeDie(sides) {
+  const g = liveSet()?.groups.findLast((x) => x.sides === sides && x.state === 'staged');
+  if (g) removeGroup(g);
+}
+
 function toggleAdv(mode) {
+  const s = liveSet();
+  if (s && started(s)) return; // locked once this roll has begun
   adv = adv === mode ? null : mode;
-  if (adv && Object.keys(pool).length && !pool[20]) addDie(20, 1);
+  if (s) {
+    s.adv = adv;
+    // Give every d20 on the table a partner die (or take it away).
+    for (const g of s.groups.filter((x) => x.sides === 20)) {
+      const want = adv ? 2 : 1;
+      while (g.dice.length > want) tray.remove(g.dice.pop());
+      while (g.dice.length < want) g.dice.push(Object.assign(tray.stage({ sides: 20 }), { group: g }));
+    }
+  }
+  if (adv && !s?.groups.some((x) => x.sides === 20)) addDie(20);
   else renderPool();
 }
 
-const getMod = () => parseInt(modEl.value, 10) || 0;
-
-function exprOf(p, mod, advMode) {
-  const parts = ORDER.filter((s) => p[s]).map((s) => `${p[s]}d${s}`);
+function exprOf(counts, mod, advMode) {
+  const parts = ORDER.filter((s) => counts[s]).map((s) => `${counts[s]}d${s}`);
   let e = parts.join(' + ') || '1d20';
   if (mod) e += ` ${mod > 0 ? '+' : '−'} ${Math.abs(mod)}`;
   if (advMode) e += advMode === 'adv' ? ' · ADV' : ' · DIS';
   return e;
 }
 
-// ADV/DIS doubles every d20 in the roll (an empty pool means a plain d20).
-function advApplies(p) {
-  return adv && (!Object.keys(p).length || p[20]) ? adv : null;
+function countsOf(s) {
+  const c = {};
+  s?.groups.forEach((g) => (c[g.sides] = (c[g.sides] || 0) + 1));
+  return c;
 }
 
 function renderPool() {
+  const s = liveSet();
+  const counts = countsOf(s);
   for (const b of buttonsEl.children) {
-    const c = pool[b.dataset.sides] || 0;
+    const c = counts[b.dataset.sides] || 0;
     b.querySelector('.count').textContent = c ? `×${c}` : '';
     b.classList.toggle('active', c > 0);
   }
-  const empty = !Object.keys(pool).length;
   const el = $('#pool-expr');
-  el.textContent = exprOf(pool, getMod(), advApplies(pool));
-  el.classList.toggle('placeholder', empty);
+  const hasD20 = !s || counts[20];
+  el.textContent = exprOf(counts, getMod(), hasD20 ? adv : null);
+  el.classList.toggle('placeholder', !s);
   $('#adv').classList.toggle('on', adv === 'adv');
   $('#dis').classList.toggle('on', adv === 'dis');
+  const locked = !!s && started(s);
+  $('#adv').classList.toggle('locked', locked);
+  $('#dis').classList.toggle('locked', locked);
+  const staged = s ? s.groups.filter((g) => g.state === 'staged').length : 0;
+  $('#roll').textContent = s && started(s) && staged ? 'Roll rest' : 'Roll';
+  $('.hint', trayEl).classList.toggle('gone', !!set);
 }
 
 $('#clear-pool').addEventListener('click', () => {
-  pool = {};
+  tray.clear();
+  set = null;
+  held = null;
   adv = null;
   modEl.value = 0;
+  resultEl.classList.remove('show');
+  document.body.classList.remove('holding');
   renderPool();
 });
 document.querySelectorAll('[data-mod]').forEach((b) =>
   b.addEventListener('click', () => {
     modEl.value = getMod() + Number(b.dataset.mod);
-    renderPool();
+    onModChange();
   })
 );
-modEl.addEventListener('input', renderPool);
+function onModChange() {
+  renderPool();
+  if (liveSet() && started(set)) showProgress();
+}
+modEl.addEventListener('input', onModChange);
 $('#adv').addEventListener('click', () => toggleAdv('adv'));
 $('#dis').addEventListener('click', () => toggleAdv('dis'));
 $('#roll').addEventListener('click', roll);
@@ -304,143 +364,158 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-const resultEl = $('#result');
-
+/** Roll everything still waiting on the table (or a d20 if the table is empty). */
 async function roll() {
-  const r = beginRoll();
-  if (!r) return;
-  await fontsReady;
-  finishRoll(r, await tray.roll(r.specs));
+  if (!fontsLoaded) return;
+  sfx.unlock();
+  if (!liveSet()) {
+    newSet();
+    addDie(20);
+  }
+  const groups = set.groups.filter((g) => g.state === 'staged');
+  if (!groups.length) return;
+  groups.forEach((g) => (g.state = 'rolling'));
+  renderPool();
+  await tray.toss(groups.flatMap((g) => g.dice));
+  groups.forEach(groupRolled);
 }
 
-// Throw by hand: press in the tray to pick the dice up, drag and let go to fling them.
+// Throw one die by hand: press on it, drag, let go.
 let held = null;
 trayEl.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0 || !fontsLoaded) return;
-  held = beginRoll();
-  if (!held) return;
+  if (e.button !== 0 || held) return;
+  const d = tray.pick(e.clientX, e.clientY);
+  if (!d) return;
+  sfx.unlock();
+  held = d.group;
+  held.state = 'held';
   try {
     trayEl.setPointerCapture(e.pointerId);
   } catch {}
   document.body.classList.add('holding');
-  tray.grab(held.specs, e.clientX, e.clientY);
+  tray.grab(held.dice, e.clientX, e.clientY);
+  renderPool();
 });
 trayEl.addEventListener('pointermove', (e) => {
   if (held) tray.moveHand(e.clientX, e.clientY);
+  else trayEl.classList.toggle('can-grab', !!tray.pick(e.clientX, e.clientY));
 });
 const letGo = async () => {
   if (!held) return;
-  const r = held;
+  const g = held;
   held = null;
   document.body.classList.remove('holding');
-  finishRoll(r, await tray.release());
+  g.state = 'rolling';
+  renderPool();
+  await tray.release();
+  groupRolled(g);
 };
 trayEl.addEventListener('pointerup', letGo);
 trayEl.addEventListener('pointercancel', letGo);
+trayEl.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const d = tray.pick(e.clientX, e.clientY);
+  if (d && d.group.state === 'staged') removeGroup(d.group);
+});
 
-/** Snapshot the selection into dice specs and reset the controls. Returns null if a roll is in progress. */
-function beginRoll() {
-  if (rolling) return null;
-  rolling = true;
-  sfx.unlock();
-  document.body.classList.add('rolling');
-  resultEl.classList.remove('show');
-  $('.hint', trayEl)?.classList.add('gone');
+/** A group's dice have landed: score it, fire crit/fumble effects, and update the running total. */
+function groupRolled(g) {
+  if (!set || set.done || !set.groups.includes(g)) return; // table was cleared meanwhile
+  const [a, b] = g.dice.map((d) => d.value);
+  let kept = g.dice[0];
+  if (g.sides === 100) g.value = (a % 10) * 10 + (b % 10) || 100;
+  else if (b !== undefined) {
+    g.value = set.adv === 'adv' ? Math.max(a, b) : Math.min(a, b);
+    g.pair = [a, b];
+    if (a !== g.value) kept = g.dice[1];
+    tray.mark(kept === g.dice[0] ? g.dice[1] : g.dice[0], 'dropped');
+  } else g.value = a;
+  g.state = 'done';
 
-  const p = Object.keys(pool).length ? { ...pool } : { 20: 1 };
-  const mod = getMod();
-  const advMode = advApplies(pool);
-  const expr = exprOf(p, mod, advMode);
-
-  // Clear the selection now, so the next roll can be set up while these dice are still tumbling.
-  pool = {};
-  adv = null;
-  modEl.value = 0;
-  renderPool();
-
-  const specs = [];
-  const groups = [];
-  for (const s of ORDER) {
-    for (let i = 0; i < (p[s] || 0); i++) {
-      const g = { sides: s, idx: [] };
-      if (s === 100) g.idx.push(specs.push({ sides: 10, tens: true }) - 1, specs.push({ sides: 10 }) - 1);
-      else if (s === 20 && advMode) g.idx.push(specs.push({ sides: 20 }) - 1, specs.push({ sides: 20 }) - 1);
-      else g.idx.push(specs.push({ sides: s }) - 1);
-      groups.push(g);
+  if (g.sides === 20 && (g.value === 20 || g.value === 1)) {
+    g.tag = g.value === 20 ? 'crit' : 'fumble';
+    tray.mark(kept, g.tag);
+    // Several crits landing together get one fanfare, not a pile-up.
+    if (performance.now() - lastBang > 300) {
+      lastBang = performance.now();
+      g.tag === 'crit' ? sfx.crit() : sfx.fumble();
+      flash(g.tag);
+      restartAnim(trayEl, 'shake');
     }
   }
-  return { specs, groups, mod, advMode, expr };
+
+  if (set.groups.every((x) => x.state === 'done')) finishSet();
+  else showProgress();
+  renderPool();
 }
 
-function finishRoll({ groups, mod, advMode, expr }, vals) {
-  let sum = 0;
-  const crits = [], fumbles = [];
-  for (const g of groups) {
-    const [a, b] = g.idx.map((i) => vals[i]);
-    let kept = g.idx[0];
-    if (g.sides === 100) g.value = (a % 10) * 10 + (b % 10) || 100;
-    else if (b !== undefined) {
-      g.value = advMode === 'adv' ? Math.max(a, b) : Math.min(a, b);
-      g.pair = [a, b];
-      if (a !== g.value) kept = g.idx[1];
-      tray.mark(kept === g.idx[0] ? g.idx[1] : g.idx[0], 'dropped');
-    } else g.value = a;
-    if (g.sides === 20 && g.value === 20) crits.push(kept);
-    if (g.sides === 20 && g.value === 1) fumbles.push(kept);
-    sum += g.value;
-  }
-  const total = sum + mod;
-
-  const tag = crits.length ? 'crit' : fumbles.length ? 'fumble' : '';
-  crits.forEach((i) => tray.mark(i, 'crit'));
-  fumbles.forEach((i) => tray.mark(i, 'fumble'));
-  if (tag === 'crit') sfx.crit();
-  if (tag === 'fumble') sfx.fumble();
-  if (tag) {
-    flash(tag);
-    restartAnim(trayEl, 'shake');
-  }
-
-  const bySides = ORDER.map((s) => groups.filter((g) => g.sides === s)).filter((a) => a.length);
-  const breakdown = bySides
+function breakdownHtml(s, mod) {
+  const bySides = ORDER.map((x) => s.groups.filter((g) => g.sides === x)).filter((a) => a.length);
+  const html = bySides
     .map((gs) => {
-      const vs = gs.map((g) =>
-        g.pair ? `${g.value} <s>${g.pair[0] === g.value ? g.pair[1] : g.pair[0]}</s>` : String(g.value)
-      );
+      const vs = gs.map((g) => {
+        if (g.state !== 'done') return '<i class="pending">?</i>';
+        if (g.pair) return `${g.value} <s>${g.pair[0] === g.value ? g.pair[1] : g.pair[0]}</s>`;
+        return String(g.value);
+      });
       return `<span class="part"><em>${gs.length}d${gs[0].sides}</em> ${vs.join(', ')}</span>`;
     })
     .join('<span class="dot">·</span>');
-  const modHtml = mod ? `<span class="dot">·</span><em>mod</em> ${mod > 0 ? '+' : '−'}${Math.abs(mod)}` : '';
+  return html + (mod ? `<span class="dot">·</span><em>mod</em> ${mod > 0 ? '+' : '−'}${Math.abs(mod)}` : '');
+}
 
-  showResult(total, breakdown + modHtml, tag, advMode);
+const doneSum = (s) => s.groups.filter((g) => g.state === 'done').reduce((n, g) => n + g.value, 0);
 
-  state.history.unshift({ expr, total, tag, t: Date.now() });
+function showProgress() {
+  const done = set.groups.filter((g) => g.state === 'done').length;
+  const mod = getMod();
+  showResult(doneSum(set) + mod, breakdownHtml(set, mod), `Rolling · ${done} of ${set.groups.length}`, 'partial');
+}
+
+function finishSet() {
+  const s = set;
+  s.done = true;
+  const mod = getMod();
+  const total = doneSum(s) + mod;
+  const tag = s.groups.some((g) => g.tag === 'crit') ? 'crit' : s.groups.some((g) => g.tag === 'fumble') ? 'fumble' : '';
+  const advMode = s.groups.some((g) => g.pair) ? s.adv : null;
+  const label =
+    tag === 'crit' ? 'Natural 20!' : tag === 'fumble' ? 'Natural 1' : advMode === 'adv' ? 'Advantage' : advMode === 'dis' ? 'Disadvantage' : 'Total';
+  showResult(total, breakdownHtml(s, mod), label, tag);
+
+  state.history.unshift({ expr: exprOf(countsOf(s), mod, advMode), total, tag, t: Date.now() });
   state.history.length = Math.min(state.history.length, 40);
   save();
   renderHistory();
 
-  rolling = false;
-  document.body.classList.remove('rolling');
+  adv = null;
+  modEl.value = 0;
+  renderPool();
 }
 
-function countUp(el, to) {
-  const start = performance.now(), dur = 600;
+let shownTotal = 0;
+function countUp(el, from, to) {
+  const start = performance.now(), dur = 500;
   const step = (now) => {
     const t = Math.min(1, (now - start) / dur);
-    el.textContent = Math.round(to * (1 - (1 - t) ** 3));
+    el.textContent = Math.round(from + (to - from) * (1 - (1 - t) ** 3));
     if (t < 1) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
 }
 
-function showResult(total, breakdown, tag, advMode) {
-  countUp($('.result-total', resultEl), total);
+function showResult(total, breakdown, label, tag) {
+  const totalEl = $('.result-total', resultEl);
+  const fresh = !resultEl.classList.contains('show');
+  countUp(totalEl, fresh ? 0 : shownTotal, total);
+  shownTotal = total;
   $('.result-break', resultEl).innerHTML = breakdown;
-  const label = tag === 'crit' ? 'Natural 20!' : tag === 'fumble' ? 'Natural 1' : advMode === 'adv' ? 'Advantage' : advMode === 'dis' ? 'Disadvantage' : 'Total';
   $('.result-tag', resultEl).textContent = label;
   resultEl.dataset.tag = tag;
-  void resultEl.offsetWidth;
-  resultEl.classList.add('show');
+  if (fresh) {
+    void resultEl.offsetWidth;
+    resultEl.classList.add('show');
+  } else restartAnim(totalEl, 'bump');
 }
 
 function renderHistory() {

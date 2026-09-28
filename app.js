@@ -1,5 +1,5 @@
-import { DiceTray, SKINS } from './dice.js?v=11';
-import { sfx } from './sfx.js?v=11';
+import { DiceTray, SKINS } from './dice.js?v=12';
+import { sfx } from './sfx.js?v=12';
 
 const KEY = 'the-table-v1';
 const ORDER = [4, 6, 8, 10, 12, 20, 100];
@@ -458,25 +458,50 @@ function roll() {
   tray.toss(groups.flatMap((g) => g.dice));
 }
 
+/** Once a roll is finished, press on any of its dice to scoop them all back up and roll the same again. */
+function regather(e) {
+  const old = set;
+  if (!old?.done || !tray.pickRolled(e.clientX, e.clientY)) return false;
+  set = {
+    groups: old.groups.map((g) => {
+      const group = { sides: g.sides, state: 'held', dice: g.dice };
+      g.dice.forEach((d) => (d.group = group));
+      return group;
+    }),
+    adv: old.adv,
+    done: false,
+  };
+  adv = old.adv;
+  modEl.value = old.mod;
+  resultEl.classList.remove('show');
+  held = set.groups;
+  tray.regrab(set.groups.flatMap((g) => g.dice), e.clientX, e.clientY);
+  return true;
+}
+
 // Throw by hand: press on any waiting die to scoop up all of them (Shift: just that one), drag, let go.
 let held = null; // groups in the hand
 trayEl.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || held) return;
   const d = tray.pick(e.clientX, e.clientY);
-  if (!d) return;
+  if (d) {
+    held = e.shiftKey ? [d.group] : set.groups.filter((g) => g.state === 'staged');
+    held.forEach((g) => (g.state = 'held'));
+    tray.grab(held.flatMap((g) => g.dice), e.clientX, e.clientY);
+  } else if (!regather(e)) return;
   sfx.unlock();
-  held = e.shiftKey ? [d.group] : set.groups.filter((g) => g.state === 'staged');
-  held.forEach((g) => (g.state = 'held'));
   try {
     trayEl.setPointerCapture(e.pointerId);
   } catch {}
   document.body.classList.add('holding');
-  tray.grab(held.flatMap((g) => g.dice), e.clientX, e.clientY);
   renderPool();
 });
 trayEl.addEventListener('pointermove', (e) => {
   if (held) tray.moveHand(e.clientX, e.clientY);
-  else trayEl.classList.toggle('can-grab', !!tray.pick(e.clientX, e.clientY));
+  else {
+    const over = tray.pick(e.clientX, e.clientY) || (set?.done && tray.pickRolled(e.clientX, e.clientY));
+    trayEl.classList.toggle('can-grab', !!over);
+  }
 });
 const letGo = () => {
   if (!held) return;
@@ -551,7 +576,7 @@ function showProgress() {
 function finishSet() {
   const s = set;
   s.done = true;
-  const mod = getMod();
+  const mod = (s.mod = getMod()); // remembered for rolling the same dice again
   const total = doneSum(s) + mod;
   const tag = s.groups.some((g) => g.tag === 'crit') ? 'crit' : s.groups.some((g) => g.tag === 'fumble') ? 'fumble' : '';
   const advMode = s.groups.some((g) => g.pair) ? s.adv : null;

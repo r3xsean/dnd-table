@@ -1407,6 +1407,35 @@ export class DiceTray {
     return hit ? staged.find((d) => d.mesh === hit.object) : null;
   }
 
+  /** A rolled (finished) die under the pointer, or null. */
+  pickRolled(cx, cy) {
+    const done = this.dice.filter((d) => d.state === 'done');
+    const hit = this.rayAt(cx, cy).intersectObjects(done.map((d) => d.mesh), false)[0];
+    return hit ? done.find((d) => d.mesh === hit.object) : null;
+  }
+
+  /** Pick rolled dice back up for another roll: clear their highlights and put them in the hand. */
+  regrab(dice, cx, cy) {
+    if (this.ascent && dice.includes(this.ascent.d)) this.endAscent();
+    this.glows = this.glows.filter((g) => {
+      if (!dice.some((d) => d.glow === g)) return true;
+      this.scene.remove(g.light);
+      return false;
+    });
+    for (const d of dice) {
+      if (d.ownMat) d.mesh.material.dispose();
+      d.ownMat = false;
+      d.mesh.material = d.kind.material;
+      d.mesh.children[0].visible = true;
+      d.mesh.castShadow = true;
+      d.glow = null;
+      d.value = null;
+    }
+    this.endHype();
+    this.hypeUsed = false; // a fresh roll gets its own chance at slow motion
+    this.grab(dice, cx, cy);
+  }
+
   /** Scoop staged dice off the table and toss them into the middle (the Roll button). */
   toss(dice) {
     const { xHalf, zMin, zMax } = this.bounds;

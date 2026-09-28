@@ -1,5 +1,5 @@
-import { DiceTray, SKINS } from './dice.js?v=9';
-import { sfx } from './sfx.js?v=9';
+import { DiceTray, SKINS } from './dice.js?v=10';
+import { sfx } from './sfx.js?v=10';
 
 const KEY = 'the-table-v1';
 const ORDER = [4, 6, 8, 10, 12, 20, 100];
@@ -540,7 +540,7 @@ function finishSet() {
 let shownTotal = 0;
 let countToken = 0;
 function countUp(el, from, to) {
-  const start = performance.now(), dur = 500;
+  const start = performance.now(), dur = 350;
   const token = ++countToken; // a newer count takes over from this one
   const step = (now) => {
     if (token !== countToken) return;

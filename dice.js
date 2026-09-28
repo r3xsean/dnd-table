@@ -1330,17 +1330,24 @@ export class DiceTray {
       if (d.state !== 'rolling') continue;
       d.rollT += dt;
       const b = d.body;
-      const moving = b.velocity.length() > 0.12 || b.angularVelocity.length() > 0.25;
-      d.still = moving ? 0 : d.still + dt;
-      if (!timeout && !(d.still > 0.3 && d.rollT > 0.6)) continue;
+      // Resting dice keep a tiny physics jitter, so "still" means still to the eye, not exactly zero.
+      const calm = b.velocity.length() < 0.5 && b.angularVelocity.length() < 0.8;
+      d.still = calm ? d.still + dt : 0;
+      if (!timeout && !(d.still > 0.2 && d.rollT > 0.5)) continue;
       const r = readDie(d);
       const propped = r.bottom > (this.inHolder(d) ? 0.6 : 0.15); // resting on another die
-      if ((!r.flat || propped) && !timeout && d.nudges < 4) {
-        // Leaning on another die or a wall: give it a little hop.
+      if ((!r.flat || propped) && !timeout) {
+        if (d.still < 0.6) continue; // it may still be tipping over by itself
+        if (d.nudges >= 4) {
+          this.settle(d, r.value);
+          continue;
+        }
+        // Leaning on another die or a wall: give it a little hop toward the middle of the table.
         d.nudges++;
         d.still = 0;
         b.wakeUp();
-        b.velocity.set(rand(-2, 2), rand(5, 8), rand(-2, 2));
+        const toMid = new THREE.Vector2(-b.position.x, -b.position.z).normalize().multiplyScalar(3);
+        b.velocity.set(toMid.x + rand(-1.5, 1.5), rand(5, 8), toMid.y + rand(-1.5, 1.5));
         b.angularVelocity.set(rand(-8, 8), rand(-8, 8), rand(-8, 8));
         continue;
       }

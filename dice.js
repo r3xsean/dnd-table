@@ -244,6 +244,7 @@ function readDie(die) {
 const rand = (a, b) => a + Math.random() * (b - a);
 
 const HAND_Y = 4.5;
+const SLOT = 2.6; // spacing of dice in the holder
 const HAND_GAP = 2.6;
 // Held dice sit in hex clusters of 7, stacked in layers.
 const HEX = [[0, 0], [1, 0], [0.5, 0.866], [-0.5, 0.866], [-1, 0], [-0.5, -0.866], [0.5, -0.866]];
@@ -335,7 +336,6 @@ export class DiceTray {
     this.fx = [];
     this.glows = [];
     this.hand = null;
-    this.slot = 0; // next free spot in the staging row
     this.dirty = true;
 
     const renderer = (this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }));
@@ -372,7 +372,7 @@ export class DiceTray {
     world.allowSleep = true;
     this.diceMat = new CANNON.Material('dice');
     const floorMat = new CANNON.Material('floor');
-    const wallMat = new CANNON.Material('wall');
+    const wallMat = (this.wallMat = new CANNON.Material('wall'));
     world.addContactMaterial(new CANNON.ContactMaterial(floorMat, this.diceMat, { friction: 0.3, restitution: 0.4 }));
     world.addContactMaterial(new CANNON.ContactMaterial(wallMat, this.diceMat, { friction: 0.05, restitution: 0.7 }));
     world.addContactMaterial(new CANNON.ContactMaterial(this.diceMat, this.diceMat, { friction: 0.15, restitution: 0.5 }));
@@ -386,6 +386,9 @@ export class DiceTray {
       world.addBody(b);
       return b;
     });
+
+    this.holder = this.makeHolder();
+    scene.add(this.holder.group);
 
     new ResizeObserver(() => this.resize()).observe(el);
     this.resize();
@@ -416,10 +419,11 @@ export class DiceTray {
         g.light.intensity = g.base * (0.85 + 0.15 * pulse);
         this.dirty = true;
       }
+      this.updateHolder(dt);
       if (this.dice.length) {
         world.step(1 / 120, dt, 12);
         for (const d of this.dice) {
-          if (!d.inWorld) continue; // held dice are posed by the hand
+          if (!d.inWorld || d.state === 'staged') continue; // posed by the hand / the holder
           d.mesh.position.copy(d.body.position);
           d.mesh.quaternion.copy(d.body.quaternion);
           if (d.body.type === CANNON.Body.DYNAMIC && d.body.sleepState !== CANNON.Body.SLEEPING) this.dirty = true;
@@ -468,7 +472,147 @@ export class DiceTray {
     const ext = Math.max(xHalf, -zMin, zMax) + 4;
     sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext;
     sc.updateProjectionMatrix();
+    this.layoutHolder();
     this.dirty = true;
+  }
+
+  /* ----- The dice holder: a little tray at the bottom of the table where added dice wait ----- */
+
+  makeHolder() {
+    const group = new THREE.Group();
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const wood = new THREE.MeshStandardMaterial({ color: 0x1c1b22, roughness: 0.55, metalness: 0.1 });
+    const felt = new THREE.MeshStandardMaterial({ color: 0x8a1222, roughness: 1 });
+    const trim = new THREE.MeshStandardMaterial({ color: 0xffd23f, roughness: 0.4 });
+    const mk = (mat) => {
+      const m = new THREE.Mesh(box, mat);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      group.add(m);
+      return m;
+    };
+    const parts = {
+      base: mk(wood),
+      felt: mk(felt),
+      rims: [mk(wood), mk(wood), mk(wood), mk(wood)],
+      caps: [mk(trim), mk(trim), mk(trim), mk(trim)],
+    };
+    group.visible = false;
+    // w/d/z animate toward tw/td/tz; slide goes 0 (in view) → 1 (slid off the bottom edge).
+    return { group, parts, w: 4, d: 4, z: 0, tw: 4, td: 4, tz: 0, slide: 1, target: 1, body: null };
+  }
+
+  sizeHolder() {
+    const { parts, w, d } = this.holder;
+    const t = 0.28, rimH = 1;
+    parts.base.scale.set(w, 0.4, d);
+    parts.base.position.set(0, 0.2, 0);
+    parts.felt.scale.set(w - 2 * t, 0.04, d - 2 * t);
+    parts.felt.position.set(0, 0.41, 0);
+    const rims = [
+      [w, t, 0, d / 2 - t / 2],
+      [w, t, 0, -(d / 2 - t / 2)],
+      [t, d - 2 * t, w / 2 - t / 2, 0],
+      [t, d - 2 * t, -(w / 2 - t / 2), 0],
+    ];
+    rims.forEach(([sx, sz, x, z], i) => {
+      parts.rims[i].scale.set(sx, rimH, sz);
+      parts.rims[i].position.set(x, rimH / 2, z);
+      parts.caps[i].scale.set(sx, 0.08, sz);
+      parts.caps[i].position.set(x, rimH + 0.04, z);
+    });
+  }
+
+  /** Re-slot the waiting dice and size the holder to fit them (slides it out when empty). */
+  layoutHolder() {
+    const h = this.holder;
+    if (!h || !this.bounds) return;
+    const staged = this.dice.filter((d) => d.state === 'staged');
+    const n = staged.length;
+    const { xHalf, zMax } = this.bounds;
+    const maxCols = Math.max(1, Math.floor((2 * xHalf - 2) / SLOT));
+    const cols = Math.max(1, Math.min(n, maxCols));
+    const rows = Math.max(1, Math.ceil(n / cols));
+    h.tw = cols * SLOT + 0.9;
+    h.td = rows * SLOT + 0.9;
+    h.tz = zMax - h.td / 2 - 0.2;
+    staged.forEach((d, i) => {
+      const c = i % cols, r = Math.floor(i / cols);
+      d.slot = new THREE.Vector3((c - (cols - 1) / 2) * SLOT, 0, (r - (rows - 1) / 2) * SLOT);
+    });
+    h.target = n ? 0 : 1;
+
+    // Static collider so thrown dice bounce off the holder (and the dice waiting in it).
+    if (h.body) this.world.removeBody(h.body);
+    h.body = null;
+    if (n) {
+      const b = new CANNON.Body({ mass: 0, material: this.wallMat });
+      const t = 0.28, rimH = 1, W = h.tw, D = h.td;
+      b.addShape(new CANNON.Box(new CANNON.Vec3(W / 2, 0.2, D / 2)), new CANNON.Vec3(0, 0.2, 0));
+      b.addShape(new CANNON.Box(new CANNON.Vec3(W / 2, rimH / 2, t / 2)), new CANNON.Vec3(0, rimH / 2, D / 2 - t / 2));
+      b.addShape(new CANNON.Box(new CANNON.Vec3(W / 2, rimH / 2, t / 2)), new CANNON.Vec3(0, rimH / 2, -(D / 2 - t / 2)));
+      b.addShape(new CANNON.Box(new CANNON.Vec3(t / 2, rimH / 2, D / 2)), new CANNON.Vec3(W / 2 - t / 2, rimH / 2, 0));
+      b.addShape(new CANNON.Box(new CANNON.Vec3(t / 2, rimH / 2, D / 2)), new CANNON.Vec3(-(W / 2 - t / 2), rimH / 2, 0));
+      b.position.set(0, 0, h.tz);
+      this.world.addBody(b);
+      h.body = b;
+    }
+    this.dirty = true;
+  }
+
+  updateHolder(dt) {
+    const h = this.holder;
+    const k = 1 - Math.exp(-dt * 9);
+    const before = h.slide + h.w + h.d + h.z;
+    const ease = (key, target) => {
+      h[key] += (target - h[key]) * k;
+      if (Math.abs(target - h[key]) < 0.002) h[key] = target;
+    };
+    ease('slide', h.target);
+    ease('w', h.tw);
+    ease('d', h.td);
+    ease('z', h.tz);
+    let moving = Math.abs(before - (h.slide + h.w + h.d + h.z)) > 1e-6;
+    h.group.visible = h.slide < 0.999;
+    if (moving) this.sizeHolder();
+    h.group.position.set(0, 0, h.z + h.slide * (h.td + 6));
+
+    const goal = new THREE.Vector3();
+    for (const d of this.dice) {
+      if (d.state !== 'staged') continue;
+      goal.copy(h.group.position).add(d.slot);
+      goal.y = 0.42 + d.restY;
+      const dist = d.mesh.position.distanceTo(goal);
+      d.mesh.position.lerp(goal, 1 - Math.exp(-dt * 14));
+      d.mesh.quaternion.slerp(d.restQ, 1 - Math.exp(-dt * 10));
+      if (!d.landed && dist < 0.25) {
+        d.landed = true;
+        this.hooks.onImpact?.(6, 'floor');
+      }
+      d.body.position.copy(d.mesh.position);
+      d.body.quaternion.copy(d.mesh.quaternion);
+      if (dist > 0.002) moving = true;
+    }
+    if (moving) this.dirty = true;
+  }
+
+  setStatic(d) {
+    const b = d.body;
+    b.type = CANNON.Body.STATIC;
+    b.mass = 0;
+    b.updateMassProperties();
+    b.velocity.setZero();
+    b.angularVelocity.setZero();
+  }
+
+  setDynamic(d) {
+    const b = d.body;
+    b.type = CANNON.Body.DYNAMIC;
+    b.mass = 1;
+    b.updateMassProperties();
+    b.position.copy(d.mesh.position);
+    b.quaternion.copy(d.mesh.quaternion);
+    b.wakeUp();
   }
 
   /* ----- Dice lifecycle: stage() puts a die on the table, then it is grabbed/tossed, then read ----- */
@@ -482,7 +626,9 @@ export class DiceTray {
     this.glows = [];
     this.fx = [];
     this.hand = null;
-    this.slot = 0;
+    // Hide the holder instantly so the next roll's holder slides in fresh.
+    this.layoutHolder();
+    this.holder.slide = 1;
     this.dirty = true;
   }
 
@@ -528,26 +674,24 @@ export class DiceTray {
     return die;
   }
 
-  /** Drop a new die onto the table's staging row. Returns the die handle. */
+  /** Put a new die in the holder (it drops into its slot). Returns the die handle. */
   stage(spec) {
     const d = this.makeDie(spec);
-    const { xHalf, zMax } = this.bounds;
-    const gap = 2.7;
-    const perRow = Math.max(1, Math.floor((2 * xHalf - 2) / gap));
-    const i = this.slot++;
-    d.body.position.set(
-      -xHalf + 1.9 + (i % perRow) * gap + rand(-0.2, 0.2),
-      2.2,
-      zMax - 1.9 - Math.floor(i / perRow) * gap + rand(-0.2, 0.2)
-    );
-    d.body.quaternion.setFromEuler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28));
-    d.body.angularVelocity.set(rand(-6, 6), rand(-6, 6), rand(-6, 6));
+    // Rest flat on a random face with a random twist.
+    const face = d.def.faces[Math.floor(Math.random() * d.def.faces.length)];
+    d.restY = face.normal.dot(d.def.verts[face.idx[0]]);
+    d.restQ = new THREE.Quaternion()
+      .setFromUnitVectors(face.normal, new THREE.Vector3(0, -1, 0))
+      .premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rand(0, Math.PI * 2)));
     d.state = 'staged';
+    this.setStatic(d);
     this.addBody(d);
-    d.mesh.position.copy(d.body.position);
-    d.mesh.quaternion.copy(d.body.quaternion);
-    this.scene.add(d.mesh);
     this.dice.push(d);
+    this.layoutHolder();
+    d.mesh.position.copy(this.holder.group.position).add(d.slot);
+    d.mesh.position.y = 5;
+    d.mesh.quaternion.setFromEuler(new THREE.Euler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28)));
+    this.scene.add(d.mesh);
     this.dirty = true;
     return d;
   }
@@ -555,7 +699,7 @@ export class DiceTray {
   remove(d) {
     this.discard(d);
     this.dice = this.dice.filter((x) => x !== d);
-    this.dirty = true;
+    this.layoutHolder();
   }
 
   onCollide(die, e) {
@@ -601,14 +745,15 @@ export class DiceTray {
     for (const d of dice) {
       const b = d.body;
       d.state = 'rolling';
+      this.setDynamic(d);
       this.addBody(d);
-      b.wakeUp();
       const dir = new CANNON.Vec3(rand(-xHalf * 0.5, xHalf * 0.5) - b.position.x, 0, zc + rand(-2, 2) - b.position.z);
       const speed = THREE.MathUtils.clamp(dir.length() * 2.2 + rand(3, 8), 6, 34);
       dir.normalize();
       b.velocity.set(dir.x * speed, rand(12, 17), dir.z * speed);
       b.angularVelocity.set(rand(-25, 25), rand(-25, 25), rand(-25, 25));
     }
+    this.layoutHolder();
     this.hooks.onThrow?.(0.7);
     return this.startThrow(dice);
   }
@@ -641,7 +786,7 @@ export class DiceTray {
       d.spin = rand(3, 7);
     }
     this.hand = { dice, target, pos: target.clone(), samples: [{ t: performance.now(), p: target.clone() }] };
-    this.dirty = true;
+    this.layoutHolder(); // an emptied holder slides away
   }
 
   moveHand(cx, cy) {
@@ -684,16 +829,14 @@ export class DiceTray {
     const flung = speed > 3;
 
     for (const d of h.dice) {
-      const { body, mesh } = d;
-      body.position.copy(mesh.position);
-      body.quaternion.copy(mesh.quaternion);
+      const { body } = d;
+      this.setDynamic(d);
       if (flung) body.velocity.set(vel.x * rand(0.9, 1.1), rand(-2, 2), vel.z * rand(0.9, 1.1));
       else body.velocity.set(rand(-4, 4), 0, rand(-4, 4)); // just a click: let it drop
       const s = 10 + speed * 0.8;
       body.angularVelocity.set(rand(-s, s), rand(-s, s), rand(-s, s));
       d.state = 'rolling';
       this.addBody(d);
-      body.wakeUp();
     }
     this.hooks.onThrow?.(flung ? Math.min(1, speed / 35) : 0.2);
     return this.startThrow(h.dice);
